@@ -16,6 +16,9 @@ module hdmi_mixer #(
 
     input wire[3:0]   I_debug_status,
     input wire [19:0] I_candidate_count,
+    input wire [19:0] I_min_area,
+    input wire [19:0] I_max_area,
+    input wire        I_threshold_mode,
 
     output wire       O_video_rd_en,
     input wire[23:0]  I_video_rd_data,
@@ -63,6 +66,20 @@ module hdmi_mixer #(
     reg [23:0] S_bcd_shift;
     reg [4:0]  S_bcd_step;
     reg        S_bcd_busy;
+    reg [19:0] S_area_bin_shift;
+    reg [23:0] S_area_bcd_shift;
+    reg [4:0]  S_area_bcd_step;
+    reg        S_area_bcd_busy;
+    reg [19:0] S_area_value_d;
+    reg [3:0]  S_area_d0, S_area_d1, S_area_d2;
+    reg [3:0]  S_area_d3, S_area_d4, S_area_d5;
+    reg [19:0] S_max_bin_shift;
+    reg [23:0] S_max_bcd_shift;
+    reg [4:0]  S_max_bcd_step;
+    reg        S_max_bcd_busy;
+    reg [19:0] S_max_value_d;
+    reg [3:0]  S_max_d0, S_max_d1, S_max_d2;
+    reg [3:0]  S_max_d3, S_max_d4, S_max_d5;
     wire [23:0] S_bcd_adjusted;
     wire [23:0] S_bcd_shift_next;
     reg [11:0] S_dyn_x;
@@ -116,7 +133,7 @@ module hdmi_mixer #(
     localparam DYN_OSD_X         = 12'd375;
     localparam DYN_OSD_Y         = 12'd120;
     localparam DYN_OSD_W         = 12'd200;
-    localparam DYN_OSD_H         = 12'd24;
+    localparam DYN_OSD_H         = 12'd72;
     localparam CN_Y_OFFSET       = 12'd2;
     localparam COLOR_DYN_TEXT    = 24'hfff200;
     localparam CHAR_AN           = 8'h80;
@@ -126,6 +143,9 @@ module hdmi_mixer #(
     localparam CHAR_T            = 8'h54;
     localparam CHAR_0            = 8'h30;
     localparam CHAR_COLON        = 8'h3a;
+    localparam CHAR_A            = 8'h41;
+    localparam CHAR_E            = 8'h45;
+    localparam CHAR_R            = 8'h52;
 
     function [23:0] F_bcd_add3;
         input [23:0] I_bcd;
@@ -143,6 +163,10 @@ module hdmi_mixer #(
 
     assign S_bcd_adjusted = F_bcd_add3(S_bcd_shift);
     assign S_bcd_shift_next = {S_bcd_adjusted[22:0],S_bcd_bin_shift[19]};
+    wire [23:0] S_area_bcd_adjusted = F_bcd_add3(S_area_bcd_shift);
+    wire [23:0] S_area_bcd_next = {S_area_bcd_adjusted[22:0],S_area_bin_shift[19]};
+    wire [23:0] S_max_bcd_adjusted = F_bcd_add3(S_max_bcd_shift);
+    wire [23:0] S_max_bcd_next = {S_max_bcd_adjusted[22:0],S_max_bin_shift[19]};
     function [4:0] F_logo_text_bits;
         input [3:0] I_char;
         input [2:0] I_row;
@@ -560,6 +584,75 @@ module hdmi_mixer #(
             end
         end
     end
+
+    // Convert the selected area threshold only when it changes. This keeps
+    // decimal formatting off the per-pixel combinational path.
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if(!I_rst_n) begin
+            S_area_bin_shift <= 20'd0;
+            S_area_bcd_shift <= 24'd0;
+            S_area_bcd_step <= 5'd0;
+            S_area_bcd_busy <= 1'b0;
+            S_area_value_d <= 20'd64;
+            S_area_d0 <= 4'd4; S_area_d1 <= 4'd6; S_area_d2 <= 4'd0;
+            S_area_d3 <= 4'd0; S_area_d4 <= 4'd0; S_area_d5 <= 4'd0;
+        end else if(I_min_area != S_area_value_d) begin
+            S_area_value_d <= I_min_area;
+            S_area_bin_shift <= I_min_area;
+            S_area_bcd_shift <= 24'd0;
+            S_area_bcd_step <= 5'd0;
+            S_area_bcd_busy <= 1'b1;
+        end else if(S_area_bcd_busy) begin
+            S_area_bin_shift <= {S_area_bin_shift[18:0],1'b0};
+            S_area_bcd_shift <= S_area_bcd_next;
+            if(S_area_bcd_step == 5'd19) begin
+                S_area_d5 <= S_area_bcd_next[23:20];
+                S_area_d4 <= S_area_bcd_next[19:16];
+                S_area_d3 <= S_area_bcd_next[15:12];
+                S_area_d2 <= S_area_bcd_next[11:8];
+                S_area_d1 <= S_area_bcd_next[7:4];
+                S_area_d0 <= S_area_bcd_next[3:0];
+                S_area_bcd_busy <= 1'b0;
+            end else begin
+                S_area_bcd_step <= S_area_bcd_step + 5'd1;
+            end
+        end
+    end
+
+    // Keep a second decimal readout for the largest component reported by CCL.
+    // This lets the operator compare the live object size with the MIN gate.
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if(!I_rst_n) begin
+            S_max_bin_shift <= 20'd0;
+            S_max_bcd_shift <= 24'd0;
+            S_max_bcd_step <= 5'd0;
+            S_max_bcd_busy <= 1'b0;
+            S_max_value_d <= 20'd0;
+            S_max_d0 <= 4'd0; S_max_d1 <= 4'd0; S_max_d2 <= 4'd0;
+            S_max_d3 <= 4'd0; S_max_d4 <= 4'd0; S_max_d5 <= 4'd0;
+        end else if(I_max_area != S_max_value_d) begin
+            S_max_value_d <= I_max_area;
+            S_max_bin_shift <= I_max_area;
+            S_max_bcd_shift <= 24'd0;
+            S_max_bcd_step <= 5'd0;
+            S_max_bcd_busy <= 1'b1;
+        end else if(S_max_bcd_busy) begin
+            S_max_bin_shift <= {S_max_bin_shift[18:0],1'b0};
+            S_max_bcd_shift <= S_max_bcd_next;
+            if(S_max_bcd_step == 5'd19) begin
+                S_max_d5 <= S_max_bcd_next[23:20];
+                S_max_d4 <= S_max_bcd_next[19:16];
+                S_max_d3 <= S_max_bcd_next[15:12];
+                S_max_d2 <= S_max_bcd_next[11:8];
+                S_max_d1 <= S_max_bcd_next[7:4];
+                S_max_d0 <= S_max_bcd_next[3:0];
+                S_max_bcd_busy <= 1'b0;
+            end else begin
+                S_max_bcd_step <= S_max_bcd_step + 5'd1;
+            end
+        end
+    end
+
     always @(posedge I_clk or negedge I_rst_n) begin
         if(!I_rst_n) begin
             S_x_1d <= 12'd0;
@@ -644,6 +737,113 @@ module hdmi_mixer #(
                 S_dyn_x = S_x_2d - DYN_OSD_X;
                 S_dyn_y = S_y_2d - DYN_OSD_Y;
 
+                if((S_dyn_y >= 12'd24) && (S_dyn_y < 12'd72)) begin
+                    // Second and third lines compare the minimum gate with largest CCL area.
+                    if((S_dyn_x < 12'd48) &&
+                       (((S_dyn_y >= 12'd28) && (S_dyn_y < 12'd44)) ||
+                        ((S_dyn_y >= 12'd52) && (S_dyn_y < 12'd68)))) begin
+                        if(S_dyn_x < 12'd16) begin
+                            S_pf_char = 8'h4d; // M
+                            S_pf_local_x = S_dyn_x[4:0];
+                        end else if(S_dyn_x < 12'd32) begin
+                            S_pf_char = (S_dyn_y < 12'd48) ? 8'h49 : 8'h41; // I / A
+                            S_pf_local_x = S_dyn_x - 12'd16;
+                        end else begin
+                            S_pf_char = (S_dyn_y < 12'd48) ? 8'h4e : 8'h58; // N / X
+                            S_pf_local_x = S_dyn_x - 12'd32;
+                        end
+                        S_pf_local_y = (S_dyn_y < 12'd48) ?
+                                       (S_dyn_y - 12'd28) : (S_dyn_y - 12'd52);
+                        S_pf_col = S_pf_local_x[3:0];
+                        S_pf_row = S_pf_local_y[3:0];
+                        case(S_pf_col)
+                            4'd0:  S_pf_on = S_pf_row_bits[15];
+                            4'd1:  S_pf_on = S_pf_row_bits[14];
+                            4'd2:  S_pf_on = S_pf_row_bits[13];
+                            4'd3:  S_pf_on = S_pf_row_bits[12];
+                            4'd4:  S_pf_on = S_pf_row_bits[11];
+                            4'd5:  S_pf_on = S_pf_row_bits[10];
+                            4'd6:  S_pf_on = S_pf_row_bits[9];
+                            4'd7:  S_pf_on = S_pf_row_bits[8];
+                            4'd8:  S_pf_on = S_pf_row_bits[7];
+                            4'd9:  S_pf_on = S_pf_row_bits[6];
+                            4'd10: S_pf_on = S_pf_row_bits[5];
+                            4'd11: S_pf_on = S_pf_row_bits[4];
+                            4'd12: S_pf_on = S_pf_row_bits[3];
+                            4'd13: S_pf_on = S_pf_row_bits[2];
+                            4'd14: S_pf_on = S_pf_row_bits[1];
+                            4'd15: S_pf_on = S_pf_row_bits[0];
+                            default: S_pf_on = 1'b0;
+                        endcase
+                    end else if((S_dyn_x >= 12'd48) && (S_dyn_x < 12'd56) &&
+                                (((S_dyn_y >= 12'd28) && (S_dyn_y < 12'd44)) ||
+                                 ((S_dyn_y >= 12'd52) && (S_dyn_y < 12'd68)))) begin
+                        S_pf_char = CHAR_COLON;
+                        S_pf_local_x = S_dyn_x - 12'd48;
+                        S_pf_local_y = (S_dyn_y < 12'd48) ?
+                                       (S_dyn_y - 12'd28) : (S_dyn_y - 12'd52);
+                        S_pf_scale_x = S_pf_local_x * 10'd16;
+                        S_pf_col = S_pf_scale_x / 10'd8;
+                        S_pf_row = S_pf_local_y[3:0];
+                        case(S_pf_col)
+                            4'd0:  S_pf_on = S_pf_row_bits[15];
+                            4'd1:  S_pf_on = S_pf_row_bits[14];
+                            4'd2:  S_pf_on = S_pf_row_bits[13];
+                            4'd3:  S_pf_on = S_pf_row_bits[12];
+                            4'd4:  S_pf_on = S_pf_row_bits[11];
+                            4'd5:  S_pf_on = S_pf_row_bits[10];
+                            4'd6:  S_pf_on = S_pf_row_bits[9];
+                            4'd7:  S_pf_on = S_pf_row_bits[8];
+                            4'd8:  S_pf_on = S_pf_row_bits[7];
+                            4'd9:  S_pf_on = S_pf_row_bits[6];
+                            4'd10: S_pf_on = S_pf_row_bits[5];
+                            4'd11: S_pf_on = S_pf_row_bits[4];
+                            4'd12: S_pf_on = S_pf_row_bits[3];
+                            4'd13: S_pf_on = S_pf_row_bits[2];
+                            4'd14: S_pf_on = S_pf_row_bits[1];
+                            4'd15: S_pf_on = S_pf_row_bits[0];
+                            default: S_pf_on = 1'b0;
+                        endcase
+                    end else if((S_dyn_x >= 12'd80) && (S_dyn_x < 12'd170)) begin
+                        if(S_dyn_x < 12'd95) begin S_dyn_digit_x=S_dyn_x-12'd80;  S_dyn_dec_digit=(S_dyn_y < 12'd48) ? S_area_d5 : S_max_d5; end
+                        else if(S_dyn_x < 12'd110) begin S_dyn_digit_x=S_dyn_x-12'd95;  S_dyn_dec_digit=(S_dyn_y < 12'd48) ? S_area_d4 : S_max_d4; end
+                        else if(S_dyn_x < 12'd125) begin S_dyn_digit_x=S_dyn_x-12'd110; S_dyn_dec_digit=(S_dyn_y < 12'd48) ? S_area_d3 : S_max_d3; end
+                        else if(S_dyn_x < 12'd140) begin S_dyn_digit_x=S_dyn_x-12'd125; S_dyn_dec_digit=(S_dyn_y < 12'd48) ? S_area_d2 : S_max_d2; end
+                        else if(S_dyn_x < 12'd155) begin S_dyn_digit_x=S_dyn_x-12'd140; S_dyn_dec_digit=(S_dyn_y < 12'd48) ? S_area_d1 : S_max_d1; end
+                        else begin S_dyn_digit_x=S_dyn_x-12'd155; S_dyn_dec_digit=(S_dyn_y < 12'd48) ? S_area_d0 : S_max_d0; end
+                        if(S_dyn_digit_x < 12'd15) begin
+                            S_pf_char = CHAR_0 + {4'd0, S_dyn_dec_digit};
+                            S_pf_local_x = S_dyn_digit_x[4:0];
+                            S_pf_local_y = (S_dyn_y < 12'd48) ?
+                                           (S_dyn_y - 12'd24) : (S_dyn_y - 12'd48);
+                            S_pf_scale_x = S_pf_local_x * 10'd16;
+                            S_pf_scale_y = S_pf_local_y * 10'd16;
+                            S_pf_col = S_pf_scale_x / 10'd15;
+                            S_pf_row = S_pf_scale_y / 10'd24;
+                            case(S_pf_col)
+                                4'd0:  S_pf_on = S_pf_row_bits[15];
+                                4'd1:  S_pf_on = S_pf_row_bits[14];
+                                4'd2:  S_pf_on = S_pf_row_bits[13];
+                                4'd3:  S_pf_on = S_pf_row_bits[12];
+                                4'd4:  S_pf_on = S_pf_row_bits[11];
+                                4'd5:  S_pf_on = S_pf_row_bits[10];
+                                4'd6:  S_pf_on = S_pf_row_bits[9];
+                                4'd7:  S_pf_on = S_pf_row_bits[8];
+                                4'd8:  S_pf_on = S_pf_row_bits[7];
+                                4'd9:  S_pf_on = S_pf_row_bits[6];
+                                4'd10: S_pf_on = S_pf_row_bits[5];
+                                4'd11: S_pf_on = S_pf_row_bits[4];
+                                4'd12: S_pf_on = S_pf_row_bits[3];
+                                4'd13: S_pf_on = S_pf_row_bits[2];
+                                4'd14: S_pf_on = S_pf_row_bits[1];
+                                4'd15: S_pf_on = S_pf_row_bits[0];
+                                default: S_pf_on = 1'b0;
+                            endcase
+                        end
+                    end
+                    if(S_pf_on)
+                        S_dyn_on = 1'b1;
+                end else begin
                 // Unified prefix render using one character library.
                 // an:[0..23], lu:[24..47], C:[52..67], N:[68..83], T:[84..99], :[100..107]
                 if((S_dyn_x < 12'd108) && (S_dyn_y < 12'd24)) begin
@@ -822,10 +1022,11 @@ module hdmi_mixer #(
                             S_dyn_on = 1'b1;
                     end
                 end
+                end // first OSD line (frame count)
 
                 if(S_dyn_on) begin
                     S_osd_hit = 1'b1;
-                    S_osd_color = COLOR_DYN_TEXT;
+                    S_osd_color = I_threshold_mode ? 24'h00ff00 : COLOR_DYN_TEXT;
                 end
             end
         end

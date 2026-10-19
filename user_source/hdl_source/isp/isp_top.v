@@ -7,6 +7,7 @@ module isp_top (
     input 			I_tvalid		,
     input [9:0] 	I_tdest			,
     input 			O_tready		,
+	input [19:0]    I_min_area,
     input 			I_edge_key		,	// KEY1: 边缘检测切换按键(低有效, 直连板级I_button[1])
     output [127:0] 	O_tdata			,
     output [19:0]   O_candidate_count,
@@ -196,12 +197,21 @@ color_mask_96 #(
 );
 // ---- 连通域检测: 红色候选 → 多目标外接框+面积 ----
 // 4邻域 union-find 合并, 按面积降序输出全部达标连通域 (MAX_OBJ=2);
-// O_bbox_valid[i]=第i大连通域面积>=MIN_AREA(64), 是红框与告警的唯一判定源
+// O_bbox_valid[i]=第i大连通域面积>=帧锁存的 I_min_area (复位初值64)
 // (绿色像素/掩码显示色不产生候选, 不触发)
+// Latch the selected threshold at frame start so it stays constant throughout
+// each frame and cannot change component decisions mid-frame.
+reg [19:0] S_min_area_frame;
+always @(posedge axi4s_video_aclk or negedge I_rst_n) begin
+    if(!I_rst_n)
+        S_min_area_frame <= 20'd64;
+    else if(awb_O_tuser)
+        S_min_area_frame <= I_min_area;
+end
+
 detect_ccl_96 #(
     .IMG_WIDTH (1280),
-    .IMG_HEIGHT(720),
-    .MIN_AREA  (20'd64)
+    .IMG_HEIGHT(720)
 ) u_detect_ccl_96 (
     .I_clk        (axi4s_video_aclk),
     .I_rst_n      (I_rst_n),
@@ -209,6 +219,7 @@ detect_ccl_96 #(
     .I_tuser      (awb_O_tuser),
     .I_tlast      (awb_O_tlast),
     .I_tvalid     (awb_O_tvalid),
+    .I_min_area   (S_min_area_frame),
     .O_bbox_xmin  (O_bbox_xmin),
     .O_bbox_xmax  (O_bbox_xmax),
     .O_bbox_ymin  (O_bbox_ymin),

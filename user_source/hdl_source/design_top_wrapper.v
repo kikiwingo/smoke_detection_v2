@@ -9,7 +9,7 @@ module design_top_wrapper (
     output wire       O_cam_24m,
     output wire       O_cam_rst,
       
-    inout wire [1:0]  I_button,
+    inout wire [3:0]  I_button,
 
     output wire       O_screen_pwm,
     output wire       O_led_fire,    // 阶段1: 明火告警LED (D10, 高亮=告警)
@@ -97,6 +97,11 @@ module design_top_wrapper (
     wire [39:0] S_area_cam;
     wire [19:0] S_bbox_ymin_cam, S_bbox_ymax_cam;
     wire [1:0]  S_bbox_valid_cam;
+	reg  [19:0] S_min_area_config_hdmi;
+	reg         S_min_area_toggle_hdmi;
+	reg  [19:0] S_min_area_sync1_cam, S_min_area_sync2_cam, S_min_area_cam;
+	reg         S_min_area_toggle_sync1_cam, S_min_area_toggle_sync2_cam;
+	reg         S_min_area_toggle_sync2_d_cam;
 	wire 			S_ISP_O_tlast ;
 	wire 			S_ISP_O_tuser ;
 	wire 			S_ISP_O_tvalid;
@@ -642,6 +647,7 @@ isp_top u_isp_top (
 .I_tvalid        (S_raw_tvalid	),
 .I_tdest         (),
 .O_tready        (S_ISP_O_tready),
+.I_min_area      (S_min_area_cam),
 .I_edge_key      (1'b1),           // KEY1 已上移至显示域 quad_top(五态循环), ISP 恒出原图
 .O_tdata         (S_ISP_O_tdata ),
 .O_candidate_count(S_candidate_count_cam),
@@ -658,6 +664,27 @@ isp_top u_isp_top (
 .O_tvalid        (S_ISP_O_tvalid),
 .I_tready        ()
   );
+
+// The adjustable threshold is changed in the HDMI/control clock domain and
+// transferred as a stable bus with a toggle handshake into the camera domain.
+always @(posedge S_csi_rx_clk or negedge S_rst_n) begin
+    if(!S_rst_n) begin
+        S_min_area_sync1_cam <= 20'd64;
+        S_min_area_sync2_cam <= 20'd64;
+        S_min_area_cam <= 20'd64;
+        S_min_area_toggle_sync1_cam <= 1'b0;
+        S_min_area_toggle_sync2_cam <= 1'b0;
+        S_min_area_toggle_sync2_d_cam <= 1'b0;
+    end else begin
+        S_min_area_sync1_cam <= S_min_area_config_hdmi;
+        S_min_area_sync2_cam <= S_min_area_sync1_cam;
+        S_min_area_toggle_sync1_cam <= S_min_area_toggle_hdmi;
+        S_min_area_toggle_sync2_cam <= S_min_area_toggle_sync1_cam;
+        S_min_area_toggle_sync2_d_cam <= S_min_area_toggle_sync2_cam;
+        if(S_min_area_toggle_sync2_cam != S_min_area_toggle_sync2_d_cam)
+            S_min_area_cam <= S_min_area_sync2_cam;
+    end
+end
 
 
 	// Frame-rate toggle provides a coherent transfer of the stable 20-bit count
@@ -705,7 +732,7 @@ end
 // 每帧一个脉冲, 作为判定模块的帧结算信号 (与计数锁存同一拍)
 wire S_frame_tick = (S_candidate_toggle_sync2 != S_candidate_toggle_sync2_d);
 
-// ---- 帧级目标有效标志 (连通域面积判定, detect_ccl_96 内 MIN_AREA=64, 上板标定) ----
+// ---- 帧级目标有效标志 (连通域面积判定, 阈值默认64并支持按键调节) ----
 // fire: 至少一个红色连通域面积 >= MIN_AREA (bbox_valid两位分别对应面积排序的两个目标),
 //       有框必有警; (连通域检测取代原"候选像素计数>=2"判定: 绿色像素/散点噪声
 //       不形成 >=MIN_AREA 的连通域, 无法触发框选与告警)
@@ -746,10 +773,140 @@ detect_judge u_detect_judge(
     .O_alarm_cig   (                      ),
     .O_buzzer      (O_buzzer              )
 );
-// ---- KEY2 画面暂停功能 (I_button[0]=A9=板载KEY2) ----
-	// 按键低有效, 取反后送消抖, 按下沿翻转暂停状态;
-	// 暂停冻结video_in的写/读指针, 显示画面静止, 再按恢复
+// ---- K3/K4 专用于面积门槛减/加；K1视图切换、K2画面暂停保持原功能 ----
     wire S_pause_key_trig;
+    reg S_area_down_trig;
+    reg S_area_up_trig;
+    reg S_area_key_dn_sync1, S_area_key_dn_sync2;
+    reg S_area_key_up_sync1, S_area_key_up_sync2;
+    reg S_area_key_dn_pressed, S_area_key_up_pressed;
+    reg [20:0] S_area_key_dn_db_cnt, S_area_key_up_db_cnt;
+    reg [25:0] S_area_key_dn_hold_cnt, S_area_key_up_hold_cnt;
+    reg S_area_key_dn_repeat, S_area_key_up_repeat;
+    localparam [20:0] AREA_KEY_DEBOUNCE_CYCLES = 21'd1113750; // 15ms @ 74.25MHz
+    localparam [25:0] AREA_KEY_REPEAT_DELAY_CYCLES = 26'd33412500; // 450ms
+    localparam [23:0] AREA_KEY_REPEAT_INTERVAL_CYCLES = 24'd11137500; // 150ms
+
+    // K3/K4: one step as soon as a debounced press is accepted, then repeat
+    // after 450ms and every 150ms while held. Inputs are active-low.
+    always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
+        if(!S_hdmi_rst_n) begin
+            S_area_key_dn_sync1 <= 1'b0;
+            S_area_key_dn_sync2 <= 1'b0;
+            S_area_key_up_sync1 <= 1'b0;
+            S_area_key_up_sync2 <= 1'b0;
+            S_area_key_dn_pressed <= 1'b0;
+            S_area_key_up_pressed <= 1'b0;
+            S_area_key_dn_db_cnt <= 21'd0;
+            S_area_key_up_db_cnt <= 21'd0;
+            S_area_key_dn_hold_cnt <= 26'd0;
+            S_area_key_up_hold_cnt <= 26'd0;
+            S_area_key_dn_repeat <= 1'b0;
+            S_area_key_up_repeat <= 1'b0;
+            S_area_down_trig <= 1'b0;
+            S_area_up_trig <= 1'b0;
+        end else begin
+            S_area_key_dn_sync1 <= ~I_button[2];
+            S_area_key_dn_sync2 <= S_area_key_dn_sync1;
+            S_area_key_up_sync1 <= ~I_button[3];
+            S_area_key_up_sync2 <= S_area_key_up_sync1;
+            S_area_down_trig <= 1'b0;
+            S_area_up_trig <= 1'b0;
+
+            // K3: lower the area threshold.
+            if(S_area_key_dn_sync2 == S_area_key_dn_pressed) begin
+                S_area_key_dn_db_cnt <= 21'd0;
+                if(S_area_key_dn_pressed) begin
+                    if(!S_area_key_dn_repeat) begin
+                        if(S_area_key_dn_hold_cnt >= AREA_KEY_REPEAT_DELAY_CYCLES - 1'b1) begin
+                            S_area_key_dn_repeat <= 1'b1;
+                            S_area_key_dn_hold_cnt <= 26'd0;
+                            S_area_down_trig <= 1'b1;
+                        end else begin
+                            S_area_key_dn_hold_cnt <= S_area_key_dn_hold_cnt + 1'b1;
+                        end
+                    end else if(S_area_key_dn_hold_cnt >= AREA_KEY_REPEAT_INTERVAL_CYCLES - 1'b1) begin
+                        S_area_key_dn_hold_cnt <= 26'd0;
+                        S_area_down_trig <= 1'b1;
+                    end else begin
+                        S_area_key_dn_hold_cnt <= S_area_key_dn_hold_cnt + 1'b1;
+                    end
+                end else begin
+                    S_area_key_dn_hold_cnt <= 26'd0;
+                    S_area_key_dn_repeat <= 1'b0;
+                end
+            end else if(S_area_key_dn_db_cnt >= AREA_KEY_DEBOUNCE_CYCLES - 1'b1) begin
+                S_area_key_dn_pressed <= S_area_key_dn_sync2;
+                S_area_key_dn_db_cnt <= 21'd0;
+                if(S_area_key_dn_sync2) begin
+                    S_area_down_trig <= 1'b1;
+                    S_area_key_dn_hold_cnt <= 26'd0;
+                    S_area_key_dn_repeat <= 1'b0;
+                end else begin
+                    S_area_key_dn_hold_cnt <= 26'd0;
+                    S_area_key_dn_repeat <= 1'b0;
+                end
+            end else begin
+                S_area_key_dn_db_cnt <= S_area_key_dn_db_cnt + 1'b1;
+            end
+
+            // K4: raise the area threshold.
+            if(S_area_key_up_sync2 == S_area_key_up_pressed) begin
+                S_area_key_up_db_cnt <= 21'd0;
+                if(S_area_key_up_pressed) begin
+                    if(!S_area_key_up_repeat) begin
+                        if(S_area_key_up_hold_cnt >= AREA_KEY_REPEAT_DELAY_CYCLES - 1'b1) begin
+                            S_area_key_up_repeat <= 1'b1;
+                            S_area_key_up_hold_cnt <= 26'd0;
+                            S_area_up_trig <= 1'b1;
+                        end else begin
+                            S_area_key_up_hold_cnt <= S_area_key_up_hold_cnt + 1'b1;
+                        end
+                    end else if(S_area_key_up_hold_cnt >= AREA_KEY_REPEAT_INTERVAL_CYCLES - 1'b1) begin
+                        S_area_key_up_hold_cnt <= 26'd0;
+                        S_area_up_trig <= 1'b1;
+                    end else begin
+                        S_area_key_up_hold_cnt <= S_area_key_up_hold_cnt + 1'b1;
+                    end
+                end else begin
+                    S_area_key_up_hold_cnt <= 26'd0;
+                    S_area_key_up_repeat <= 1'b0;
+                end
+            end else if(S_area_key_up_db_cnt >= AREA_KEY_DEBOUNCE_CYCLES - 1'b1) begin
+                S_area_key_up_pressed <= S_area_key_up_sync2;
+                S_area_key_up_db_cnt <= 21'd0;
+                if(S_area_key_up_sync2) begin
+                    S_area_up_trig <= 1'b1;
+                    S_area_key_up_hold_cnt <= 26'd0;
+                    S_area_key_up_repeat <= 1'b0;
+                end else begin
+                    S_area_key_up_hold_cnt <= 26'd0;
+                    S_area_key_up_repeat <= 1'b0;
+                end
+            end else begin
+                S_area_key_up_db_cnt <= S_area_key_up_db_cnt + 1'b1;
+            end
+        end
+    end
+
+    wire S_threshold_mode = 1'b0;
+    always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
+        if(!S_hdmi_rst_n) begin
+            S_min_area_config_hdmi <= 20'd64;
+            S_min_area_toggle_hdmi <= 1'b0;
+        end else if(S_area_down_trig) begin
+            if(S_min_area_config_hdmi > 20'd64) begin
+                S_min_area_config_hdmi <= S_min_area_config_hdmi - 20'd64;
+                S_min_area_toggle_hdmi <= ~S_min_area_toggle_hdmi;
+            end
+        end else if(S_area_up_trig) begin
+            if(S_min_area_config_hdmi < 20'd65536) begin
+                S_min_area_config_hdmi <= S_min_area_config_hdmi + 20'd64;
+                S_min_area_toggle_hdmi <= ~S_min_area_toggle_hdmi;
+            end
+        end
+    end
+
     reg  S_display_pause;
     key_remove_shakes u_pause_key_shakes(
         .I_clk          (S_hdmi_pixel_clk),
@@ -994,6 +1151,9 @@ detect_judge u_detect_judge(
         .I_video_last    ( S_hdmi_last        ),
         .I_debug_status  ( S_hdmi_debug_status),
         .I_candidate_count(S_candidate_count_sync),
+        .I_min_area      ( S_min_area_config_hdmi),
+        .I_max_area      ( S_area_sync[19:0]),
+        .I_threshold_mode( S_threshold_mode),
         .O_video_rd_en   ( S_hdmi_window_rd_en),
         .I_video_rd_data ( S_video_rd_data    ),
         .O_hdmi_vsync    ( S_hdmi_out_vsync   ),
@@ -1088,7 +1248,9 @@ detect_judge u_detect_judge(
         .I_rst_n      (S_hdmi_rst_n    ),
         .I_hsync      (S_box_hsync     ),
         .I_vsync      (S_box_vsync     ),
-        .I_alarm      (S_fire_valid    ),
+        // Show ALARM only while the debounced/held fire alarm is active,
+        // matching the fire LED instead of the raw per-frame detector.
+        .I_alarm      (O_led_fire      ),
         .I_quad_mode  (S_quad_mode_hdmi),   // QUAD模式: ALARM文字1x缩至右下象限
         .O_osd_pixel  (S_alarm_rgb     ),
         .O_osd_alpha  (S_alarm_alpha   ),
@@ -1128,6 +1290,7 @@ detect_judge u_detect_judge(
         .I_clk        (S_hdmi_pixel_clk),
         .I_rst_n      (S_hdmi_rst_n    ),
         .I_key        (I_button[1]     ),   // KEY1: 五态循环 (低有效, 模块内消抖)
+        .I_view_enable(1'b1),
         .I_vid_de     (S_hdmi_out_de   ),
         .I_vid_hsync  (S_hdmi_out_hsync),
         .I_vid_vsync  (S_hdmi_out_vsync),

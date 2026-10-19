@@ -2,6 +2,7 @@ module quad_top (
     input              I_clk,
     input              I_rst_n,
     input              I_key,          // KEY1 (低有效, 直连 I_button[1])
+    input              I_view_enable,  // 阈值调节期间屏蔽短按视图切换
     // 原图流 (hdmi_mixer 输出, 含 LOGO+候选计数OSD, 相对判定流早 3 拍)
     input              I_vid_de,
     input              I_vid_hsync,
@@ -49,7 +50,7 @@ module quad_top (
     always @(posedge I_clk or negedge I_rst_n) begin
         if(!I_rst_n)
             view_mode <= 3'd0;
-        else if(S_key_trig)
+        else if(S_key_trig && I_view_enable)
             view_mode <= (view_mode == 3'd4) ? 3'd0 : view_mode + 3'd1;
     end
 
@@ -209,16 +210,16 @@ module quad_top (
         cur_en = 1'b0; cur_x0 = 11'd0; cur_y0 = 10'd0; cur_s = 2'd0;
         if(view_mode == 3'd0) begin
             // 四象限标签 (区域互不重叠)
-            if     ((x_cnt >= 11'd8)   && (x_cnt < 11'd132) && (y_cnt >= 10'd6)   && (y_cnt < 10'd22))  begin cur_en = 1'b1; cur_x0 = 11'd8;   cur_y0 = 10'd6;   cur_s = 2'd0; end
-            else if((x_cnt >= 11'd648) && (x_cnt < 11'd772) && (y_cnt >= 10'd6)   && (y_cnt < 10'd22))  begin cur_en = 1'b1; cur_x0 = 11'd648; cur_y0 = 10'd6;   cur_s = 2'd1; end
-            else if((x_cnt >= 11'd8)   && (x_cnt < 11'd132) && (y_cnt >= 10'd366) && (y_cnt < 10'd382)) begin cur_en = 1'b1; cur_x0 = 11'd8;   cur_y0 = 10'd366; cur_s = 2'd2; end
-            else if((x_cnt >= 11'd648) && (x_cnt < 11'd772) && (y_cnt >= 10'd366) && (y_cnt < 10'd382)) begin cur_en = 1'b1; cur_x0 = 11'd648; cur_y0 = 10'd366; cur_s = 2'd3; end
+            if     ((x_cnt >= 11'd8)   && (x_cnt < 11'd90)  && (y_cnt >= 10'd4)   && (y_cnt < 10'd20))  begin cur_en = 1'b1; cur_x0 = 11'd8;   cur_y0 = 10'd4;   cur_s = 2'd0; end
+            else if((x_cnt >= 11'd648) && (x_cnt < 11'd730) && (y_cnt >= 10'd4)   && (y_cnt < 10'd20))  begin cur_en = 1'b1; cur_x0 = 11'd648; cur_y0 = 10'd4;   cur_s = 2'd1; end
+            else if((x_cnt >= 11'd8)   && (x_cnt < 11'd90)  && (y_cnt >= 10'd364) && (y_cnt < 10'd380)) begin cur_en = 1'b1; cur_x0 = 11'd8;   cur_y0 = 10'd364; cur_s = 2'd2; end
+            else if((x_cnt >= 11'd648) && (x_cnt < 11'd730) && (y_cnt >= 10'd364) && (y_cnt < 10'd380)) begin cur_en = 1'b1; cur_x0 = 11'd648; cur_y0 = 10'd364; cur_s = 2'd3; end
         end else begin
             case(view_mode)
             3'd1: begin cur_en = 1'b1; cur_x0 = 11'd1194; cur_y0 = 10'd0; cur_s = 2'd0; end   // ORIGINAL
-            3'd2: begin cur_en = 1'b1; cur_x0 = 11'd1234; cur_y0 = 10'd0; cur_s = 2'd1; end   // EDGE
-            3'd3: begin cur_en = 1'b1; cur_x0 = 11'd1234; cur_y0 = 10'd0; cur_s = 2'd2; end   // MASK
-            3'd4: begin cur_en = 1'b1; cur_x0 = 11'd1214; cur_y0 = 10'd0; cur_s = 2'd3; end   // DETECT
+            3'd2: begin cur_en = 1'b1; cur_x0 = 11'd1194; cur_y0 = 10'd0; cur_s = 2'd1; end   // EDGE MAP
+            3'd3: begin cur_en = 1'b1; cur_x0 = 11'd1194; cur_y0 = 10'd0; cur_s = 2'd2; end   // RED MASK
+            3'd4: begin cur_en = 1'b1; cur_x0 = 11'd1194; cur_y0 = 10'd0; cur_s = 2'd3; end   // TARGET
             default: ;
             endcase
         end
@@ -230,198 +231,134 @@ module quad_top (
         input [2:0] i;
         begin
             case({s, i})
-            5'd0 : lbl_char = 4'd0;    // s=0 "ORIG"
+            5'd0 : lbl_char = 4'd0;    // s=0 "ORIGINAL"
             5'd1 : lbl_char = 4'd1;
             5'd2 : lbl_char = 4'd2;
             5'd3 : lbl_char = 4'd3;
-            5'd8 : lbl_char = 4'd7;    // s=1 "EDGE"
+            5'd4 : lbl_char = 4'd2;
+            5'd5 : lbl_char = 4'd4;
+            5'd6 : lbl_char = 4'd5;
+            5'd7 : lbl_char = 4'd6;
+            5'd8 : lbl_char = 4'd7;    // s=1 "EDGE MAP"
             5'd9 : lbl_char = 4'd8;
             5'd10: lbl_char = 4'd3;
             5'd11: lbl_char = 4'd7;
-            5'd16: lbl_char = 4'd9;    // s=2 "MASK"
-            5'd17: lbl_char = 4'd5;
-            5'd18: lbl_char = 4'd10;
-            5'd19: lbl_char = 4'd11;
-            5'd24: lbl_char = 4'd8;    // s=3 "DETECT"
-            5'd25: lbl_char = 4'd7;
-            5'd26: lbl_char = 4'd13;
-            5'd27: lbl_char = 4'd7;
-            5'd28: lbl_char = 4'd12;
+            5'd12: lbl_char = 4'hF;   // 空格
+            5'd13: lbl_char = 4'd9;
+            5'd14: lbl_char = 4'd5;
+            5'd15: lbl_char = 4'd14;
+            5'd16: lbl_char = 4'd1;   // s=2 "RED MASK"
+            5'd17: lbl_char = 4'd7;
+            5'd18: lbl_char = 4'd8;
+            5'd19: lbl_char = 4'hF;
+            5'd20: lbl_char = 4'd9;
+            5'd21: lbl_char = 4'd5;
+            5'd22: lbl_char = 4'd10;
+            5'd23: lbl_char = 4'd11;
+            5'd24: lbl_char = 4'd13;  // s=3 "TARGET"
+            5'd25: lbl_char = 4'd5;
+            5'd26: lbl_char = 4'd1;
+            5'd27: lbl_char = 4'd3;
+            5'd28: lbl_char = 4'd7;
             5'd29: lbl_char = 4'd13;
             default: lbl_char = 4'hF;  // 空
             endcase
         end
     endfunction
 
-    // ---- 8x16 标签字模 (bit7=左, 行4..11 字身, 其余行空) ----
-    // 数据取自历史工程 osd_alpha.v 已验证字库, 字符索引:
-    // 0=O 1=R 2=I 3=G 4=N 5=A 6=L 7=E 8=D 9=M 10=S 11=K 12=C 13=T
-    function [7:0] label_font;
+    // ---- 8x14 标签字模: 字体风格与 osd_alarm 的 ALARM 字模一致 ----
+    // 每个5x7点阵行重复两次, 保持小字号, 形成清楚、粗实的14像素字高。
+    function [4:0] label_row5;
         input [3:0] ch;
-        input [3:0] row;
+        input [2:0] row;
         begin
             case (ch)
-            4'd0: case(row)   // 'O'
-                4'd4 : label_font = 8'hCF;
-                4'd5 : label_font = 8'hD9;
-                4'd6 : label_font = 8'hF1;
-                4'd7 : label_font = 8'hF1;
-                4'd8 : label_font = 8'hF1;
-                4'd9 : label_font = 8'hF1;
-                4'd10: label_font = 8'hDB;
-                4'd11: label_font = 8'hDE;
-                default: label_font = 8'h00;
+            4'd0: case(row) // O
+                0:label_row5=5'b01110; 1:label_row5=5'b10001; 2:label_row5=5'b10001;
+                3:label_row5=5'b10001; 4:label_row5=5'b10001; 5:label_row5=5'b10001;
+                6:label_row5=5'b01110; default:label_row5=5'b00000;
             endcase
-            4'd1: case(row)   // 'R'
-                4'd4 : label_font = 8'h1F;
-                4'd5 : label_font = 8'h19;
-                4'd6 : label_font = 8'h99;
-                4'd7 : label_font = 8'h99;
-                4'd8 : label_font = 8'h9E;
-                4'd9 : label_font = 8'h9B;
-                4'd10: label_font = 8'h1B;
-                4'd11: label_font = 8'h19;
-                default: label_font = 8'h00;
+            4'd1: case(row) // R
+                0:label_row5=5'b11110; 1:label_row5=5'b10001; 2:label_row5=5'b10001;
+                3:label_row5=5'b11110; 4:label_row5=5'b10100; 5:label_row5=5'b10010;
+                6:label_row5=5'b10001; default:label_row5=5'b00000;
             endcase
-            4'd2: case(row)   // 'I'
-                4'd4 : label_font = 8'h8F;
-                4'd5 : label_font = 8'h86;
-                4'd6 : label_font = 8'h86;
-                4'd7 : label_font = 8'h86;
-                4'd8 : label_font = 8'h86;
-                4'd9 : label_font = 8'h86;
-                4'd10: label_font = 8'h86;
-                4'd11: label_font = 8'h8F;
-                default: label_font = 8'h00;
+            4'd2: case(row) // I
+                0:label_row5=5'b11111; 1:label_row5=5'b00100; 2:label_row5=5'b00100;
+                3:label_row5=5'b00100; 4:label_row5=5'b00100; 5:label_row5=5'b00100;
+                6:label_row5=5'b11111; default:label_row5=5'b00000;
             endcase
-            4'd3: case(row)   // 'G'
-                4'd4 : label_font = 8'h0F;
-                4'd5 : label_font = 8'h18;
-                4'd6 : label_font = 8'h30;
-                4'd7 : label_font = 8'h30;
-                4'd8 : label_font = 8'h33;
-                4'd9 : label_font = 8'h31;
-                4'd10: label_font = 8'h19;
-                4'd11: label_font = 8'h0F;
-                default: label_font = 8'h00;
+            4'd3: case(row) // G
+                0:label_row5=5'b01110; 1:label_row5=5'b10001; 2:label_row5=5'b10000;
+                3:label_row5=5'b10111; 4:label_row5=5'b10001; 5:label_row5=5'b10001;
+                6:label_row5=5'b01110; default:label_row5=5'b00000;
             endcase
-            4'd4: case(row)   // 'N'
-                4'd4 : label_font = 8'h1C;
-                4'd5 : label_font = 8'h1C;
-                4'd6 : label_font = 8'h1E;
-                4'd7 : label_font = 8'h1A;
-                4'd8 : label_font = 8'h1A;
-                4'd9 : label_font = 8'h1B;
-                4'd10: label_font = 8'h19;
-                4'd11: label_font = 8'h19;
-                default: label_font = 8'h00;
+            4'd4: case(row) // N
+                0:label_row5=5'b10001; 1:label_row5=5'b11001; 2:label_row5=5'b10101;
+                3:label_row5=5'b10011; 4:label_row5=5'b10001; 5:label_row5=5'b10001;
+                6:label_row5=5'b10001; default:label_row5=5'b00000;
             endcase
-            4'd5: case(row)   // 'A'
-                4'd4 : label_font = 8'h0E;
-                4'd5 : label_font = 8'h0A;
-                4'd6 : label_font = 8'h0B;
-                4'd7 : label_font = 8'h0B;
-                4'd8 : label_font = 8'h19;
-                4'd9 : label_font = 8'h1F;
-                4'd10: label_font = 8'h11;
-                4'd11: label_font = 8'h10;
-                default: label_font = 8'h00;
+            4'd5: case(row) // A
+                0:label_row5=5'b01110; 1:label_row5=5'b10001; 2:label_row5=5'b10001;
+                3:label_row5=5'b11111; 4:label_row5=5'b10001; 5:label_row5=5'b10001;
+                6:label_row5=5'b10001; default:label_row5=5'b00000;
             endcase
-            4'd6: case(row)   // 'L'
-                4'd4 : label_font = 8'h98;
-                4'd5 : label_font = 8'h18;
-                4'd6 : label_font = 8'h18;
-                4'd7 : label_font = 8'h18;
-                4'd8 : label_font = 8'h18;
-                4'd9 : label_font = 8'h18;
-                4'd10: label_font = 8'h18;
-                4'd11: label_font = 8'h9F;
-                default: label_font = 8'h00;
+            4'd6: case(row) // L
+                0:label_row5=5'b10000; 1:label_row5=5'b10000; 2:label_row5=5'b10000;
+                3:label_row5=5'b10000; 4:label_row5=5'b10000; 5:label_row5=5'b10000;
+                6:label_row5=5'b11111; default:label_row5=5'b00000;
             endcase
-            4'd7: case(row)   // 'E'
-                4'd4 : label_font = 8'h1F;
-                4'd5 : label_font = 8'h98;
-                4'd6 : label_font = 8'hD8;
-                4'd7 : label_font = 8'hDF;
-                4'd8 : label_font = 8'hD8;
-                4'd9 : label_font = 8'hD8;
-                4'd10: label_font = 8'h98;
-                4'd11: label_font = 8'h1F;
-                default: label_font = 8'h00;
+            4'd7: case(row) // E
+                0:label_row5=5'b11111; 1:label_row5=5'b10000; 2:label_row5=5'b10000;
+                3:label_row5=5'b11110; 4:label_row5=5'b10000; 5:label_row5=5'b10000;
+                6:label_row5=5'b11111; default:label_row5=5'b00000;
             endcase
-            4'd8: case(row)   // 'D'
-                4'd4 : label_font = 8'h9F;
-                4'd5 : label_font = 8'h19;
-                4'd6 : label_font = 8'h18;
-                4'd7 : label_font = 8'h18;
-                4'd8 : label_font = 8'h18;
-                4'd9 : label_font = 8'h18;
-                4'd10: label_font = 8'h19;
-                4'd11: label_font = 8'h9F;
-                default: label_font = 8'h00;
+            4'd8: case(row) // D
+                0:label_row5=5'b11110; 1:label_row5=5'b10001; 2:label_row5=5'b10001;
+                3:label_row5=5'b10001; 4:label_row5=5'b10001; 5:label_row5=5'b10001;
+                6:label_row5=5'b11110; default:label_row5=5'b00000;
             endcase
-            4'd9: case(row)   // 'M'
-                4'd4 : label_font = 8'h1B;
-                4'd5 : label_font = 8'h1B;
-                4'd6 : label_font = 8'h1B;
-                4'd7 : label_font = 8'h1B;
-                4'd8 : label_font = 8'h15;
-                4'd9 : label_font = 8'h15;
-                4'd10: label_font = 8'h11;
-                4'd11: label_font = 8'h11;
-                default: label_font = 8'h00;
+            4'd9: case(row) // M
+                0:label_row5=5'b10001; 1:label_row5=5'b11011; 2:label_row5=5'b10101;
+                3:label_row5=5'b10101; 4:label_row5=5'b10001; 5:label_row5=5'b10001;
+                6:label_row5=5'b10001; default:label_row5=5'b00000;
             endcase
-            4'd10: case(row)  // 'S'
-                4'd4 : label_font = 8'h0F;
-                4'd5 : label_font = 8'h98;
-                4'd6 : label_font = 8'h98;
-                4'd7 : label_font = 8'h9E;
-                4'd8 : label_font = 8'h07;
-                4'd9 : label_font = 8'h01;
-                4'd10: label_font = 8'h01;
-                4'd11: label_font = 8'h9F;
-                default: label_font = 8'h00;
+            4'd10: case(row) // S
+                0:label_row5=5'b01111; 1:label_row5=5'b10000; 2:label_row5=5'b10000;
+                3:label_row5=5'b01110; 4:label_row5=5'b00001; 5:label_row5=5'b00001;
+                6:label_row5=5'b11110; default:label_row5=5'b00000;
             endcase
-            4'd11: case(row)  // 'K'
-                4'd4 : label_font = 8'h19;
-                4'd5 : label_font = 8'h1B;
-                4'd6 : label_font = 8'h1A;
-                4'd7 : label_font = 8'h1E;
-                4'd8 : label_font = 8'h1E;
-                4'd9 : label_font = 8'h1A;
-                4'd10: label_font = 8'h1B;
-                4'd11: label_font = 8'h19;
-                default: label_font = 8'h00;
+            4'd11: case(row) // K
+                0:label_row5=5'b10001; 1:label_row5=5'b10010; 2:label_row5=5'b10100;
+                3:label_row5=5'b11000; 4:label_row5=5'b10100; 5:label_row5=5'b10010;
+                6:label_row5=5'b10001; default:label_row5=5'b00000;
             endcase
-            4'd12: case(row)  // 'C'
-                4'd4 : label_font = 8'h07;
-                4'd5 : label_font = 8'h8C;
-                4'd6 : label_font = 8'h98;
-                4'd7 : label_font = 8'h18;
-                4'd8 : label_font = 8'h98;
-                4'd9 : label_font = 8'h98;
-                4'd10: label_font = 8'h8C;
-                4'd11: label_font = 8'h07;
-                default: label_font = 8'h00;
+            4'd13: case(row) // T
+                0:label_row5=5'b11111; 1:label_row5=5'b00100; 2:label_row5=5'b00100;
+                3:label_row5=5'b00100; 4:label_row5=5'b00100; 5:label_row5=5'b00100;
+                6:label_row5=5'b00100; default:label_row5=5'b00000;
             endcase
-            4'd13: case(row)  // 'T'
-                4'd4 : label_font = 8'h1F;
-                4'd5 : label_font = 8'h06;
-                4'd6 : label_font = 8'h06;
-                4'd7 : label_font = 8'h06;
-                4'd8 : label_font = 8'h86;
-                4'd9 : label_font = 8'h86;
-                4'd10: label_font = 8'h86;
-                4'd11: label_font = 8'h06;
-                default: label_font = 8'h00;
+            4'd14: case(row) // P
+                0:label_row5=5'b11110; 1:label_row5=5'b10001; 2:label_row5=5'b10001;
+                3:label_row5=5'b11110; 4:label_row5=5'b10000; 5:label_row5=5'b10000;
+                6:label_row5=5'b10000; default:label_row5=5'b00000;
             endcase
-            default: label_font = 8'h00;
+            default: label_row5=5'b00000;
             endcase
         end
     endfunction
 
-    // ---- 标签字模解码: 四分屏2倍放大, 全屏标签保持原生大小 ----
-    wire label_scale2 = (view_mode == 3'd0);
+    function [7:0] label_font;
+        input [3:0] ch;
+        input [3:0] row;
+        reg [4:0] row_bits;
+        begin
+            row_bits = label_row5(ch, row[3:1]);
+            label_font = {1'b0, row_bits, 2'b00};
+        end
+    endfunction
+
+    // ---- 标签字模解码: 四分屏和全屏均使用原生小字号 ----
     wire [10:0] label_x = x_cnt - cur_x0;
     wire [9:0]  label_y = y_cnt - cur_y0;
     reg [3:0]  w_ch, w_row;
@@ -431,40 +368,31 @@ module quad_top (
     always @* begin
         w_ch = 4'd0; w_row = 4'd0; w_cx = 3'd0; w_v = 1'b0;
         if(cur_en && (y_cnt >= cur_y0) && (y_cnt < cur_y0 + 10'd16)) begin
-            w_row = label_scale2 ? ((label_y >> 1) + 4'd4) : (label_y[3:0] + 4'd4);
+            w_row = label_y[3:0];
             xl = label_x;
-            if(label_scale2) begin
-                if      (xl < 11'd20)  w_ch = lbl_char(cur_s, 3'd0);
-                else if (xl < 11'd40)  begin w_ch = lbl_char(cur_s, 3'd1); xl = xl - 11'd20; end
-                else if (xl < 11'd60)  begin w_ch = lbl_char(cur_s, 3'd2); xl = xl - 11'd40; end
-                else if (xl < 11'd80)  begin w_ch = lbl_char(cur_s, 3'd3); xl = xl - 11'd60; end
-                else if (xl < 11'd100) begin w_ch = lbl_char(cur_s, 3'd4); xl = xl - 11'd80; end
-                else if (xl < 11'd120) begin w_ch = lbl_char(cur_s, 3'd5); xl = xl - 11'd100; end
-                w_cx = xl[4:1];
-                w_v = (w_ch != 4'hF) && (xl < 11'd16);
-            end else begin
-                if      (xl < 11'd10) w_ch = lbl_char(cur_s, 3'd0);
-                else if (xl < 11'd20) begin w_ch = lbl_char(cur_s, 3'd1); xl = xl - 11'd10; end
-                else if (xl < 11'd30) begin w_ch = lbl_char(cur_s, 3'd2); xl = xl - 11'd20; end
-                else if (xl < 11'd40) begin w_ch = lbl_char(cur_s, 3'd3); xl = xl - 11'd30; end
-                else if (xl < 11'd50) begin w_ch = lbl_char(cur_s, 3'd4); xl = xl - 11'd40; end
-                else if (xl < 11'd60) begin w_ch = lbl_char(cur_s, 3'd5); xl = xl - 11'd50; end
-                else if (xl < 11'd70) begin w_ch = lbl_char(cur_s, 3'd6); xl = xl - 11'd60; end
-                else if (xl < 11'd80) begin w_ch = lbl_char(cur_s, 3'd7); xl = xl - 11'd70; end
-                w_cx = xl[2:0];
-                w_v = (w_ch != 4'hF) && (xl < 11'd8);
-            end
+            if      (xl < 11'd10) w_ch = lbl_char(cur_s, 3'd0);
+            else if (xl < 11'd20) begin w_ch = lbl_char(cur_s, 3'd1); xl = xl - 11'd10; end
+            else if (xl < 11'd30) begin w_ch = lbl_char(cur_s, 3'd2); xl = xl - 11'd20; end
+            else if (xl < 11'd40) begin w_ch = lbl_char(cur_s, 3'd3); xl = xl - 11'd30; end
+            else if (xl < 11'd50) begin w_ch = lbl_char(cur_s, 3'd4); xl = xl - 11'd40; end
+            else if (xl < 11'd60) begin w_ch = lbl_char(cur_s, 3'd5); xl = xl - 11'd50; end
+            else if (xl < 11'd70) begin w_ch = lbl_char(cur_s, 3'd6); xl = xl - 11'd60; end
+            else if (xl < 11'd80) begin w_ch = lbl_char(cur_s, 3'd7); xl = xl - 11'd70; end
+            w_cx = xl[2:0];
+            w_v = (w_ch != 4'hF) && (xl < 11'd8);
         end
     end
     wire [7:0] w_font = label_font(w_ch, w_row);   // 函数结果先落 wire 再位选
     wire w_glyph = w_v && w_font[7 - w_cx];
 
-    // 四个角统一使用不透明深色底条, 防止标签被明亮/复杂画面淹没。
+    // 小尺寸深色底条与 ALARM 字号协调, 保留足够对比度。
     wire quad_label_bg = (view_mode == 3'd0) &&
-        (((y_cnt >= 10'd2) && (y_cnt < 10'd26)) ||
-         ((y_cnt >= 10'd362) && (y_cnt < 10'd386))) &&
-        (((x_cnt >= 11'd4) && (x_cnt < 11'd132)) ||
-         ((x_cnt >= 11'd644) && (x_cnt < 11'd772)));
+        (((y_cnt >= 10'd2) && (y_cnt < 10'd22)) ||
+         ((y_cnt >= 10'd362) && (y_cnt < 10'd382))) &&
+        (((x_cnt >= 11'd4) && (x_cnt < 11'd90)) ||
+         ((x_cnt >= 11'd644) && (x_cnt < 11'd730)));
+    wire fullscreen_label_bg = (view_mode != 3'd0) &&
+        (x_cnt >= 11'd1190) && (y_cnt < 10'd20);
 
     // ---- 分隔线 (QUAD: 2px 白色十字) ----
     wire sep_hit = (x_cnt == 11'd639) || (x_cnt == 11'd640) ||
@@ -480,8 +408,8 @@ module quad_top (
             O_vsync <= S_mux_vs;
             if(de_i && w_glyph)
                 O_data <= 24'hFFFFFF;             // 白字
-            else if(de_i && quad_label_bg)
-                O_data <= 24'h101820;             // 四分屏标签深色底条
+            else if(de_i && (quad_label_bg || fullscreen_label_bg))
+                O_data <= 24'h101820;             // 高对比深色标签底条
             else if(de_i && (view_mode == 3'd0) && sep_hit)
                 O_data <= 24'hFFFFFF;             // 分隔线
             else
