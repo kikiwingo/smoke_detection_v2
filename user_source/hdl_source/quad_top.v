@@ -1,0 +1,503 @@
+module quad_top (
+    input              I_clk,
+    input              I_rst_n,
+    input              I_key,          // KEY1 (低有效, 直连 I_button[1])
+    // 原图流 (hdmi_mixer 输出, 含 LOGO+候选计数OSD, 相对判定流早 3 拍)
+    input              I_vid_de,
+    input              I_vid_hsync,
+    input              I_vid_vsync,
+    input  [23:0]      I_vid_data,
+    // 判定流 (osd_box 红框 + osd_alarm 文字 叠加后的原图流, = 原图+3拍)
+    input              I_det_de,
+    input              I_det_hsync,
+    input              I_det_vsync,
+    input  [23:0]      I_det_data,
+    output reg         O_de,
+    output reg         O_hsync,
+    output reg         O_vsync,
+    output reg [23:0]  O_data,
+    output reg [2:0]   O_view_mode,    // 0=QUAD 1=ORIG 2=EDGE 3=MASK 4=DET
+    output reg         O_quad_mode     // 1=四分屏 (wrapper: vo基址/OSD坐标切换)
+);
+
+// ============================================================
+// 四分屏/全屏视图切换 + KEY1 五态循环 + 视图OSD (时钟 S_hdmi_pixel_clk)
+// 输入两路同源显示流 (同一 VTC 时序, 判定流=原图流+3拍):
+//   I_vid_* = 原图流 (hdmi_mixer 输出, 含 LOGO+候选计数OSD)
+//   I_det_* = 判定流 (osd_box+osd_alarm 输出, 原图+红框+ALARM文字)
+// 内部重建: 边缘流 (sobel_disp, +2拍->补1拍), 掩码流 (mask_disp, +1拍->补2拍)
+// 四路对齐到 原图+3拍 后 4:1 mux 寄存 1 拍, 再 1 拍输出寄存器 (总 +5 拍)
+// view_mode: 0=QUAD 1=ORIG 2=EDGE 3=MASK 4=DET (KEY1 消抖五态循环)
+// QUAD 模式: 原图流即 DDR 拼接帧 (vo 读拼接缓冲), 判定流叠加红框/ALARM
+//   (坐标已由 wrapper 按 (x>>1)+640,(y>>1)+360 变换到右下象限);
+//   叠加白分隔线(2px) + 四象限标签 (2倍字模, 白字+深色底条)
+// 全屏模式: 右上角模式名 (ORIGINAL/EDGE/MASK/DETECT)
+// 覆盖层像素计数器锚定 mux 后 hsync/vsync (与 osd_alarm 同款自校准,
+//   与 mux 数据同拍, 输出寄存后与 O_hsync/O_vsync 精确同相位)
+// 切换瞬间无复位无清缓存, 纯 mux 换源 (画面突变 1 帧, 零丢帧)
+// ============================================================
+
+    // ---- KEY1 消抖 + 五态循环 ----
+    wire S_key_trig;
+    key_remove_shakes u_key_shakes(
+        .I_clk          (I_clk),
+        .I_rst_n        (I_rst_n),
+        .I_key_in       (~I_key),
+        .O_key_trig_out (S_key_trig)
+    );
+    reg [2:0] view_mode;
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if(!I_rst_n)
+            view_mode <= 3'd0;
+        else if(S_key_trig)
+            view_mode <= (view_mode == 3'd4) ? 3'd0 : view_mode + 3'd1;
+    end
+
+    // ---- 亮度 Y=(77R+150G+29B)>>8 (sobel 输入) ----
+    wire [17:0] Y_full = I_vid_data[23:16]*8'd77 + I_vid_data[15:8]*8'd150 + I_vid_data[7:0]*8'd29;
+    wire [7:0]  Y = Y_full[15:8];
+
+    // ---- 边缘流 (+2拍) ----
+    wire [7:0]  S_edge_dout;
+    wire        S_edge_de, S_edge_hs, S_edge_vs;
+    sobel_disp u_sobel(
+        .I_clk       (I_clk),
+        .I_rst_n     (I_rst_n),
+        .I_din       (Y),
+        .I_de        (I_vid_de),
+        .I_hsync     (I_vid_hsync),
+        .I_vsync     (I_vid_vsync),
+        .O_dout      (S_edge_dout),
+        .O_de_out    (S_edge_de),
+        .O_hsync_out (S_edge_hs),
+        .O_vsync_out (S_edge_vs)
+    );
+
+    // ---- 掩码流 (+1拍) ----
+    wire [23:0] S_mask_dout;
+    wire        S_mask_de, S_mask_hs, S_mask_vs;
+    mask_disp u_mask(
+        .I_clk       (I_clk),
+        .I_rst_n     (I_rst_n),
+        .I_de        (I_vid_de),
+        .I_hsync     (I_vid_hsync),
+        .I_vsync     (I_vid_vsync),
+        .I_din       (I_vid_data),
+        .O_dout      (S_mask_dout),
+        .O_de_out    (S_mask_de),
+        .O_hsync_out (S_mask_hs),
+        .O_vsync_out (S_mask_vs)
+    );
+
+    // ---- 延迟对齐 (统一到 原图+3拍 = 判定流相位) ----
+    // 原图 +0 -> 补3; 边缘 +2 -> 补1; 掩码 +1 -> 补2; 判定 +3 -> 补0
+    reg [23:0] S_orig_d1, S_orig_d2, S_orig_d3;
+    reg        S_orig_de1, S_orig_hs1, S_orig_vs1;
+    reg        S_orig_de2, S_orig_hs2, S_orig_vs2;
+    reg        S_orig_de3, S_orig_hs3, S_orig_vs3;
+    reg [23:0] S_edge_d2;
+    reg        S_edge_de2, S_edge_hs2, S_edge_vs2;
+    reg [23:0] S_mask_d2, S_mask_d3;
+    reg        S_mask_de2, S_mask_hs2, S_mask_vs2;
+    reg        S_mask_de3, S_mask_hs3, S_mask_vs3;
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if(!I_rst_n) begin
+            S_orig_d1 <= 24'd0; S_orig_de1 <= 1'b0; S_orig_hs1 <= 1'b0; S_orig_vs1 <= 1'b0;
+            S_orig_d2 <= 24'd0; S_orig_de2 <= 1'b0; S_orig_hs2 <= 1'b0; S_orig_vs2 <= 1'b0;
+            S_orig_d3 <= 24'd0; S_orig_de3 <= 1'b0; S_orig_hs3 <= 1'b0; S_orig_vs3 <= 1'b0;
+            S_edge_d2 <= 24'd0; S_edge_de2 <= 1'b0; S_edge_hs2 <= 1'b0; S_edge_vs2 <= 1'b0;
+            S_mask_d2 <= 24'd0; S_mask_de2 <= 1'b0; S_mask_hs2 <= 1'b0; S_mask_vs2 <= 1'b0;
+            S_mask_d3 <= 24'd0; S_mask_de3 <= 1'b0; S_mask_hs3 <= 1'b0; S_mask_vs3 <= 1'b0;
+        end else begin
+            S_orig_d1 <= I_vid_data;  S_orig_de1 <= I_vid_de;  S_orig_hs1 <= I_vid_hsync; S_orig_vs1 <= I_vid_vsync;
+            S_orig_d2 <= S_orig_d1;   S_orig_de2 <= S_orig_de1; S_orig_hs2 <= S_orig_hs1; S_orig_vs2 <= S_orig_vs1;
+            S_orig_d3 <= S_orig_d2;   S_orig_de3 <= S_orig_de2; S_orig_hs3 <= S_orig_hs2; S_orig_vs3 <= S_orig_vs2;
+            S_edge_d2 <= {S_edge_dout, S_edge_dout, S_edge_dout};   // 灰度白/黑 -> RGB
+            S_edge_de2 <= S_edge_de; S_edge_hs2 <= S_edge_hs; S_edge_vs2 <= S_edge_vs;
+            S_mask_d2 <= S_mask_dout; S_mask_de2 <= S_mask_de; S_mask_hs2 <= S_mask_hs; S_mask_vs2 <= S_mask_vs;
+            S_mask_d3 <= S_mask_d2;   S_mask_de3 <= S_mask_de2; S_mask_hs3 <= S_mask_hs2; S_mask_vs3 <= S_mask_vs2;
+        end
+    end
+
+    // ---- 4:1 mux (对齐点: 原图+3拍, 四路 hsync/vsync 同相位) ----
+    reg [23:0] S_mux_data;
+    reg        S_mux_de, S_mux_hs, S_mux_vs;
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if(!I_rst_n) begin
+            S_mux_data <= 24'd0;
+            S_mux_de <= 1'b0; S_mux_hs <= 1'b0; S_mux_vs <= 1'b0;
+        end else begin
+            case(view_mode)
+            3'd1: begin   // ORIG
+                S_mux_data <= S_orig_d3;
+                S_mux_de <= S_orig_de3; S_mux_hs <= S_orig_hs3; S_mux_vs <= S_orig_vs3;
+            end
+            3'd2: begin   // EDGE
+                S_mux_data <= S_edge_d2;
+                S_mux_de <= S_edge_de2; S_mux_hs <= S_edge_hs2; S_mux_vs <= S_edge_vs2;
+            end
+            3'd3: begin   // MASK
+                S_mux_data <= S_mask_d3;
+                S_mux_de <= S_mask_de3; S_mux_hs <= S_mask_hs3; S_mux_vs <= S_mask_vs3;
+            end
+            default: begin  // 0=QUAD, 4=DET: 判定流 (原图+红框+ALARM文字)
+                S_mux_data <= I_det_data;
+                S_mux_de <= I_det_de; S_mux_hs <= I_det_hsync; S_mux_vs <= I_det_vsync;
+            end
+            endcase
+        end
+    end
+
+    // ---- 像素计数器 (锚定 mux 后同步信号, 与 S_mux_data 同拍; 同 osd_alarm 方案) ----
+    reg S_mux_hs_d1, S_mux_vs_d1;
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if(!I_rst_n) begin
+            S_mux_hs_d1 <= 1'b0;
+            S_mux_vs_d1 <= 1'b0;
+        end else begin
+            S_mux_hs_d1 <= S_mux_hs;
+            S_mux_vs_d1 <= S_mux_vs;
+        end
+    end
+    wire hs_rise = S_mux_hs && !S_mux_hs_d1;
+    wire vs_rise = S_mux_vs && !S_mux_vs_d1;
+
+    localparam [10:0] H_FRAME      = 11'd1650; // 行总拍数
+    localparam [10:0] H_ACTIVE     = 11'd1280; // 行有效像素
+    localparam [10:0] H_SYNC_START = 11'd1390; // hsync 起始相位(锚点)
+    localparam [9:0]  V_FRAME      = 10'd750;  // 场总行数
+    localparam [9:0]  V_ACTIVE     = 10'd720;  // 场有效行
+    localparam [9:0]  V_SYNC_START = 10'd725;  // vsync 起始相位(锚点)
+    reg [10:0] x_cnt;
+    reg [9:0]  y_cnt;
+    reg        locked;
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if(!I_rst_n)
+            x_cnt <= 11'd0;
+        else if(hs_rise)
+            x_cnt <= H_SYNC_START + 11'd1;
+        else if(x_cnt == H_FRAME - 11'd1)
+            x_cnt <= 11'd0;
+        else
+            x_cnt <= x_cnt + 11'd1;
+    end
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if(!I_rst_n) begin
+            y_cnt  <= 10'd0;
+            locked <= 1'b0;
+        end else begin
+            if(vs_rise) begin
+                y_cnt  <= V_SYNC_START;
+                locked <= 1'b1;
+            end else if(x_cnt == H_FRAME - 11'd1) begin
+                if(y_cnt == V_FRAME - 10'd1)
+                    y_cnt <= 10'd0;
+                else
+                    y_cnt <= y_cnt + 10'd1;
+            end
+        end
+    end
+    wire de_i = locked && (x_cnt < H_ACTIVE) && (y_cnt < V_ACTIVE);
+
+    // ---- 覆盖上下文选择 (当前像素所属标签区) ----
+    // QUAD: 四象限标签; 全屏: 右上角模式名
+    reg [10:0] cur_x0;
+    reg [9:0]  cur_y0;
+    reg [1:0]  cur_s;
+    reg        cur_en;
+    always @* begin
+        cur_en = 1'b0; cur_x0 = 11'd0; cur_y0 = 10'd0; cur_s = 2'd0;
+        if(view_mode == 3'd0) begin
+            // 四象限标签 (区域互不重叠)
+            if     ((x_cnt >= 11'd8)   && (x_cnt < 11'd132) && (y_cnt >= 10'd6)   && (y_cnt < 10'd22))  begin cur_en = 1'b1; cur_x0 = 11'd8;   cur_y0 = 10'd6;   cur_s = 2'd0; end
+            else if((x_cnt >= 11'd648) && (x_cnt < 11'd772) && (y_cnt >= 10'd6)   && (y_cnt < 10'd22))  begin cur_en = 1'b1; cur_x0 = 11'd648; cur_y0 = 10'd6;   cur_s = 2'd1; end
+            else if((x_cnt >= 11'd8)   && (x_cnt < 11'd132) && (y_cnt >= 10'd366) && (y_cnt < 10'd382)) begin cur_en = 1'b1; cur_x0 = 11'd8;   cur_y0 = 10'd366; cur_s = 2'd2; end
+            else if((x_cnt >= 11'd648) && (x_cnt < 11'd772) && (y_cnt >= 10'd366) && (y_cnt < 10'd382)) begin cur_en = 1'b1; cur_x0 = 11'd648; cur_y0 = 10'd366; cur_s = 2'd3; end
+        end else begin
+            case(view_mode)
+            3'd1: begin cur_en = 1'b1; cur_x0 = 11'd1194; cur_y0 = 10'd0; cur_s = 2'd0; end   // ORIGINAL
+            3'd2: begin cur_en = 1'b1; cur_x0 = 11'd1234; cur_y0 = 10'd0; cur_s = 2'd1; end   // EDGE
+            3'd3: begin cur_en = 1'b1; cur_x0 = 11'd1234; cur_y0 = 10'd0; cur_s = 2'd2; end   // MASK
+            3'd4: begin cur_en = 1'b1; cur_x0 = 11'd1214; cur_y0 = 10'd0; cur_s = 2'd3; end   // DETECT
+            default: ;
+            endcase
+        end
+    end
+
+    // ---- 标签字符串表: s 的第 i 字符 ----
+    function [3:0] lbl_char;
+        input [1:0] s;
+        input [2:0] i;
+        begin
+            case({s, i})
+            5'd0 : lbl_char = 4'd0;    // s=0 "ORIG"
+            5'd1 : lbl_char = 4'd1;
+            5'd2 : lbl_char = 4'd2;
+            5'd3 : lbl_char = 4'd3;
+            5'd8 : lbl_char = 4'd7;    // s=1 "EDGE"
+            5'd9 : lbl_char = 4'd8;
+            5'd10: lbl_char = 4'd3;
+            5'd11: lbl_char = 4'd7;
+            5'd16: lbl_char = 4'd9;    // s=2 "MASK"
+            5'd17: lbl_char = 4'd5;
+            5'd18: lbl_char = 4'd10;
+            5'd19: lbl_char = 4'd11;
+            5'd24: lbl_char = 4'd8;    // s=3 "DETECT"
+            5'd25: lbl_char = 4'd7;
+            5'd26: lbl_char = 4'd13;
+            5'd27: lbl_char = 4'd7;
+            5'd28: lbl_char = 4'd12;
+            5'd29: lbl_char = 4'd13;
+            default: lbl_char = 4'hF;  // 空
+            endcase
+        end
+    endfunction
+
+    // ---- 8x16 标签字模 (bit7=左, 行4..11 字身, 其余行空) ----
+    // 数据取自历史工程 osd_alpha.v 已验证字库, 字符索引:
+    // 0=O 1=R 2=I 3=G 4=N 5=A 6=L 7=E 8=D 9=M 10=S 11=K 12=C 13=T
+    function [7:0] label_font;
+        input [3:0] ch;
+        input [3:0] row;
+        begin
+            case (ch)
+            4'd0: case(row)   // 'O'
+                4'd4 : label_font = 8'hCF;
+                4'd5 : label_font = 8'hD9;
+                4'd6 : label_font = 8'hF1;
+                4'd7 : label_font = 8'hF1;
+                4'd8 : label_font = 8'hF1;
+                4'd9 : label_font = 8'hF1;
+                4'd10: label_font = 8'hDB;
+                4'd11: label_font = 8'hDE;
+                default: label_font = 8'h00;
+            endcase
+            4'd1: case(row)   // 'R'
+                4'd4 : label_font = 8'h1F;
+                4'd5 : label_font = 8'h19;
+                4'd6 : label_font = 8'h99;
+                4'd7 : label_font = 8'h99;
+                4'd8 : label_font = 8'h9E;
+                4'd9 : label_font = 8'h9B;
+                4'd10: label_font = 8'h1B;
+                4'd11: label_font = 8'h19;
+                default: label_font = 8'h00;
+            endcase
+            4'd2: case(row)   // 'I'
+                4'd4 : label_font = 8'h8F;
+                4'd5 : label_font = 8'h86;
+                4'd6 : label_font = 8'h86;
+                4'd7 : label_font = 8'h86;
+                4'd8 : label_font = 8'h86;
+                4'd9 : label_font = 8'h86;
+                4'd10: label_font = 8'h86;
+                4'd11: label_font = 8'h8F;
+                default: label_font = 8'h00;
+            endcase
+            4'd3: case(row)   // 'G'
+                4'd4 : label_font = 8'h0F;
+                4'd5 : label_font = 8'h18;
+                4'd6 : label_font = 8'h30;
+                4'd7 : label_font = 8'h30;
+                4'd8 : label_font = 8'h33;
+                4'd9 : label_font = 8'h31;
+                4'd10: label_font = 8'h19;
+                4'd11: label_font = 8'h0F;
+                default: label_font = 8'h00;
+            endcase
+            4'd4: case(row)   // 'N'
+                4'd4 : label_font = 8'h1C;
+                4'd5 : label_font = 8'h1C;
+                4'd6 : label_font = 8'h1E;
+                4'd7 : label_font = 8'h1A;
+                4'd8 : label_font = 8'h1A;
+                4'd9 : label_font = 8'h1B;
+                4'd10: label_font = 8'h19;
+                4'd11: label_font = 8'h19;
+                default: label_font = 8'h00;
+            endcase
+            4'd5: case(row)   // 'A'
+                4'd4 : label_font = 8'h0E;
+                4'd5 : label_font = 8'h0A;
+                4'd6 : label_font = 8'h0B;
+                4'd7 : label_font = 8'h0B;
+                4'd8 : label_font = 8'h19;
+                4'd9 : label_font = 8'h1F;
+                4'd10: label_font = 8'h11;
+                4'd11: label_font = 8'h10;
+                default: label_font = 8'h00;
+            endcase
+            4'd6: case(row)   // 'L'
+                4'd4 : label_font = 8'h98;
+                4'd5 : label_font = 8'h18;
+                4'd6 : label_font = 8'h18;
+                4'd7 : label_font = 8'h18;
+                4'd8 : label_font = 8'h18;
+                4'd9 : label_font = 8'h18;
+                4'd10: label_font = 8'h18;
+                4'd11: label_font = 8'h9F;
+                default: label_font = 8'h00;
+            endcase
+            4'd7: case(row)   // 'E'
+                4'd4 : label_font = 8'h1F;
+                4'd5 : label_font = 8'h98;
+                4'd6 : label_font = 8'hD8;
+                4'd7 : label_font = 8'hDF;
+                4'd8 : label_font = 8'hD8;
+                4'd9 : label_font = 8'hD8;
+                4'd10: label_font = 8'h98;
+                4'd11: label_font = 8'h1F;
+                default: label_font = 8'h00;
+            endcase
+            4'd8: case(row)   // 'D'
+                4'd4 : label_font = 8'h9F;
+                4'd5 : label_font = 8'h19;
+                4'd6 : label_font = 8'h18;
+                4'd7 : label_font = 8'h18;
+                4'd8 : label_font = 8'h18;
+                4'd9 : label_font = 8'h18;
+                4'd10: label_font = 8'h19;
+                4'd11: label_font = 8'h9F;
+                default: label_font = 8'h00;
+            endcase
+            4'd9: case(row)   // 'M'
+                4'd4 : label_font = 8'h1B;
+                4'd5 : label_font = 8'h1B;
+                4'd6 : label_font = 8'h1B;
+                4'd7 : label_font = 8'h1B;
+                4'd8 : label_font = 8'h15;
+                4'd9 : label_font = 8'h15;
+                4'd10: label_font = 8'h11;
+                4'd11: label_font = 8'h11;
+                default: label_font = 8'h00;
+            endcase
+            4'd10: case(row)  // 'S'
+                4'd4 : label_font = 8'h0F;
+                4'd5 : label_font = 8'h98;
+                4'd6 : label_font = 8'h98;
+                4'd7 : label_font = 8'h9E;
+                4'd8 : label_font = 8'h07;
+                4'd9 : label_font = 8'h01;
+                4'd10: label_font = 8'h01;
+                4'd11: label_font = 8'h9F;
+                default: label_font = 8'h00;
+            endcase
+            4'd11: case(row)  // 'K'
+                4'd4 : label_font = 8'h19;
+                4'd5 : label_font = 8'h1B;
+                4'd6 : label_font = 8'h1A;
+                4'd7 : label_font = 8'h1E;
+                4'd8 : label_font = 8'h1E;
+                4'd9 : label_font = 8'h1A;
+                4'd10: label_font = 8'h1B;
+                4'd11: label_font = 8'h19;
+                default: label_font = 8'h00;
+            endcase
+            4'd12: case(row)  // 'C'
+                4'd4 : label_font = 8'h07;
+                4'd5 : label_font = 8'h8C;
+                4'd6 : label_font = 8'h98;
+                4'd7 : label_font = 8'h18;
+                4'd8 : label_font = 8'h98;
+                4'd9 : label_font = 8'h98;
+                4'd10: label_font = 8'h8C;
+                4'd11: label_font = 8'h07;
+                default: label_font = 8'h00;
+            endcase
+            4'd13: case(row)  // 'T'
+                4'd4 : label_font = 8'h1F;
+                4'd5 : label_font = 8'h06;
+                4'd6 : label_font = 8'h06;
+                4'd7 : label_font = 8'h06;
+                4'd8 : label_font = 8'h86;
+                4'd9 : label_font = 8'h86;
+                4'd10: label_font = 8'h86;
+                4'd11: label_font = 8'h06;
+                default: label_font = 8'h00;
+            endcase
+            default: label_font = 8'h00;
+            endcase
+        end
+    endfunction
+
+    // ---- 标签字模解码: 四分屏2倍放大, 全屏标签保持原生大小 ----
+    wire label_scale2 = (view_mode == 3'd0);
+    wire [10:0] label_x = x_cnt - cur_x0;
+    wire [9:0]  label_y = y_cnt - cur_y0;
+    reg [3:0]  w_ch, w_row;
+    reg [2:0]  w_cx;
+    reg        w_v;
+    reg [10:0] xl;
+    always @* begin
+        w_ch = 4'd0; w_row = 4'd0; w_cx = 3'd0; w_v = 1'b0;
+        if(cur_en && (y_cnt >= cur_y0) && (y_cnt < cur_y0 + 10'd16)) begin
+            w_row = label_scale2 ? ((label_y >> 1) + 4'd4) : (label_y[3:0] + 4'd4);
+            xl = label_x;
+            if(label_scale2) begin
+                if      (xl < 11'd20)  w_ch = lbl_char(cur_s, 3'd0);
+                else if (xl < 11'd40)  begin w_ch = lbl_char(cur_s, 3'd1); xl = xl - 11'd20; end
+                else if (xl < 11'd60)  begin w_ch = lbl_char(cur_s, 3'd2); xl = xl - 11'd40; end
+                else if (xl < 11'd80)  begin w_ch = lbl_char(cur_s, 3'd3); xl = xl - 11'd60; end
+                else if (xl < 11'd100) begin w_ch = lbl_char(cur_s, 3'd4); xl = xl - 11'd80; end
+                else if (xl < 11'd120) begin w_ch = lbl_char(cur_s, 3'd5); xl = xl - 11'd100; end
+                w_cx = xl[4:1];
+                w_v = (w_ch != 4'hF) && (xl < 11'd16);
+            end else begin
+                if      (xl < 11'd10) w_ch = lbl_char(cur_s, 3'd0);
+                else if (xl < 11'd20) begin w_ch = lbl_char(cur_s, 3'd1); xl = xl - 11'd10; end
+                else if (xl < 11'd30) begin w_ch = lbl_char(cur_s, 3'd2); xl = xl - 11'd20; end
+                else if (xl < 11'd40) begin w_ch = lbl_char(cur_s, 3'd3); xl = xl - 11'd30; end
+                else if (xl < 11'd50) begin w_ch = lbl_char(cur_s, 3'd4); xl = xl - 11'd40; end
+                else if (xl < 11'd60) begin w_ch = lbl_char(cur_s, 3'd5); xl = xl - 11'd50; end
+                else if (xl < 11'd70) begin w_ch = lbl_char(cur_s, 3'd6); xl = xl - 11'd60; end
+                else if (xl < 11'd80) begin w_ch = lbl_char(cur_s, 3'd7); xl = xl - 11'd70; end
+                w_cx = xl[2:0];
+                w_v = (w_ch != 4'hF) && (xl < 11'd8);
+            end
+        end
+    end
+    wire [7:0] w_font = label_font(w_ch, w_row);   // 函数结果先落 wire 再位选
+    wire w_glyph = w_v && w_font[7 - w_cx];
+
+    // 四个角统一使用不透明深色底条, 防止标签被明亮/复杂画面淹没。
+    wire quad_label_bg = (view_mode == 3'd0) &&
+        (((y_cnt >= 10'd2) && (y_cnt < 10'd26)) ||
+         ((y_cnt >= 10'd362) && (y_cnt < 10'd386))) &&
+        (((x_cnt >= 11'd4) && (x_cnt < 11'd132)) ||
+         ((x_cnt >= 11'd644) && (x_cnt < 11'd772)));
+
+    // ---- 分隔线 (QUAD: 2px 白色十字) ----
+    wire sep_hit = (x_cnt == 11'd639) || (x_cnt == 11'd640) ||
+                   (y_cnt == 10'd359) || (y_cnt == 10'd360);
+
+    // ---- 输出寄存器 (mux 结果 + 覆盖层; 与同步信号同拍) ----
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if(!I_rst_n) begin
+            O_de <= 1'b0; O_hsync <= 1'b0; O_vsync <= 1'b0; O_data <= 24'd0;
+        end else begin
+            O_de    <= S_mux_de;
+            O_hsync <= S_mux_hs;
+            O_vsync <= S_mux_vs;
+            if(de_i && w_glyph)
+                O_data <= 24'hFFFFFF;             // 白字
+            else if(de_i && quad_label_bg)
+                O_data <= 24'h101820;             // 四分屏标签深色底条
+            else if(de_i && (view_mode == 3'd0) && sep_hit)
+                O_data <= 24'hFFFFFF;             // 分隔线
+            else
+                O_data <= S_mux_data;
+        end
+    end
+
+    // ---- 模式输出 (wrapper: vo基址/OSD坐标切换) ----
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if(!I_rst_n) begin
+            O_view_mode <= 3'd0;
+            O_quad_mode <= 1'b1;
+        end else begin
+            O_view_mode <= view_mode;
+            O_quad_mode <= (view_mode == 3'd0);
+        end
+    end
+
+endmodule

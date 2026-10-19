@@ -1,0 +1,17 @@
+td_project/
+*.log
+*.logw
+*.vcd
+*.fst
+*.wlf
+sim/
+work/
+*.bit
+*.bin
+*.rpt
+*.jou
+_dbg/
+_synthesis/
+_implementation/
+.DS_Store
+Thumbs.db

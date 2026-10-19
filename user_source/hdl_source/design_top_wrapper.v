@@ -1,0 +1,1180 @@
+
+
+module design_top_wrapper (
+    input wire        I_sys_clk,
+    input wire        I_rst_n,
+      
+    output wire       O_cam_scl,
+    inout  wire       IO_cam_sda,
+    output wire       O_cam_24m,
+    output wire       O_cam_rst,
+      
+    inout wire [1:0]  I_button,
+
+    output wire       O_screen_pwm,
+    output wire       O_led_fire,    // 阶段1: 明火告警LED (D10, 高亮=告警)
+    output wire       O_led_cig,     // 阶段1: 烟头告警LED (E10, 高亮=告警)
+    output wire       O_led_sys,     // 阶段2: 总告警LED (C6, sys_alarm)
+    output wire       O_buzzer,      // 蜂鸣器 (C12, 低电平有效, 国标火警双音交替: 1000/800Hz 0.5s换音)
+    output wire       O_tmds_ch0_p,
+    output wire       O_tmds_ch1_p,
+    output wire       O_tmds_ch2_p,
+    output wire       O_tmds_clk_p,
+
+    inout wire        IO_rx_clk_pad_n, 
+    inout wire        IO_rx_clk_pad_p, 
+    inout wire[3:0]   IO_rx_data_pad_n,
+    inout wire[3:0]   IO_rx_data_pad_p,
+
+    output wire[12:0] ddr_addr,
+    output wire[ 1:0] ddr_ba,
+    output wire[ 0:0] ddr_cke,
+    output wire[ 0:0] ddr_odt,
+    output wire[ 0:0] ddr_cs_n,
+    output wire       ddr_ras_n,
+    output wire       ddr_cas_n,
+    output wire       ddr_we_n,
+    output wire[ 0:0] ddr_ck_p,
+    output wire[ 0:0] ddr_ck_n,
+    inout wire[1:0]   ddr_dm,
+    inout wire[15:0]  ddr_dq,
+    inout wire[1:0]   ddr_dqs_p,
+    inout wire[1:0]   ddr_dqs_n   
+);
+
+
+    wire        	S_100m_clk;
+    wire        	S_24m_clk;
+    wire        	S_aux_50m_clk;
+	wire        	S_10m_clk;
+		
+	wire        	S_pll_lock;
+    wire        	S_rst_n;
+	reg  [17:0] 	S_cam_power_cnt;
+	reg         	S_cam_pwdnb;
+	reg         	S_cam_i2c_ready;
+	(* keep = "true" *) wire [15:0] S_cam_sensor_id;
+	(* keep = "true" *) wire        S_cam_sensor_id_ok;
+	(* keep = "true" *) wire        S_cam_i2c_error;
+	localparam integer CAM_PWDNB_LOW_CYCLES = 23810;  // >= 1 ms at 23.809524 MHz
+	localparam integer CAM_I2C_START_CYCLES = 142857; // release + >= 5 ms
+	
+	wire [15:0] 	S_ae;
+    wire [15:0] 	S_ag;
+    wire 			S_cam_cfg_done;
+    wire 			S_ae_cfg_done;
+    wire 			S_ae_req; 
+	
+	wire        	S_csi_rx_clk;  
+    wire        	S_hs_rx_valid;  
+    wire[15:0]  	S_hs_rx_data;   
+	wire[1:0]   	S_lane_error;
+	
+	wire        	S_csi_frame_start;       
+	wire        	S_csi_frame_end;         
+	wire        	S_csi_valid;             
+	wire[31:0]  	S_csi_data;  
+		
+	wire        	S_raw10_frame_start; 
+	wire        	S_raw10_frame_end;   
+	wire        	S_raw10_valid;       
+	wire [39:0] 	S_raw10_data;
+		
+	wire 			S_axis_tlast;  
+	wire 			S_axis_tuser;  
+	wire [39:0]		S_axis_tdata;  
+	wire 			S_axis_tvalid; 
+	
+	wire [39:0]		S_raw_tdata ;
+	wire			S_raw_tlast ;
+	wire 			S_raw_tvalid;
+	wire 			S_raw_tuser ;
+	
+	wire			S_ISP_O_tready;
+	wire [127:0]	S_ISP_O_tdata ;
+    wire [19:0] S_candidate_count_cam;
+    wire [21:0] S_bbox_xmin_cam, S_bbox_xmax_cam;
+    wire [39:0] S_area_cam;
+    wire [19:0] S_bbox_ymin_cam, S_bbox_ymax_cam;
+    wire [1:0]  S_bbox_valid_cam;
+	wire 			S_ISP_O_tlast ;
+	wire 			S_ISP_O_tuser ;
+	wire 			S_ISP_O_tvalid;
+
+    wire [127:0]   S_quad_tdata_cam;   // 四分屏拼接帧 (quad_isp 输出, 相机域)
+    wire           S_quad_tvalid_cam;
+    wire           S_qw_ddr_wr_en;     // 拼接帧 DDR 写用户 (quad_writer)
+    wire [24:0]    S_qw_ddr_wr_addr;
+    wire [127:0]   S_qw_ddr_wr_data;
+    wire           S_qw_ddr_wr_ready;
+    wire           S_quad_wr_busy;
+    wire           S_quad_rp;          // 拼接帧读基址选择 (0=QUAD_BASE_0 / 1=QUAD_BASE_1)
+	
+
+    wire        S_ddr_clk;
+    wire        S_hdmi_pixel_clk;
+    wire        S_hdmi_serial_clk;
+    wire        S_hdmi_rst_n;
+    wire        S_video_out_rst_n;
+
+
+    wire        S_vi_128b_frame_start;
+    wire        S_vi_128b_valid;      
+    wire[127:0] S_vi_128b_data;    
+    
+    wire        S_video_out_rd_busy;
+    wire        S_video_in_wr_busy; 
+    wire[1:0]   S_video_out_rp;     
+
+    wire        S_ddr_user_wr_en;       
+    wire        S_ddr_user_rd_en;       
+    wire[24:0]  S_ddr_user_addr;        
+    wire[127:0] S_ddr_user_wr_data;     
+    wire        S_ddr_user_ready;       
+    wire        S_ddr_user_rd_valid;    
+    wire[127:0] S_ddr_user_rd_data;     
+
+    wire        S_vi_ddr_wr_en;   
+    wire[24:0]  S_vi_ddr_wr_addr; 
+    wire[127:0] S_vi_ddr_wr_data;
+    wire        S_vi_ddr_wr_ready;
+
+    wire        S_vo_ddr_rd_en;   
+    wire[24:0]  S_vo_ddr_rd_addr; 
+    wire        S_vo_ddr_rd_ready;
+    wire        S_vo_dbg_fifo_rst;
+    wire        S_vo_dbg_ddr_rd_valid;
+    wire        S_vo_dbg_fifo_rd_en;
+    wire        S_vo_dbg_fifo_empty;
+
+    wire        S_init_calib_complete; 
+    wire[24:0]  S_mc_app_addr;          
+    wire[2:0]   S_mc_app_cmd;           
+    wire        S_mc_app_en;            
+    wire[127:0] S_mc_app_wdf_data;      
+    wire        S_mc_app_wdf_end;       
+    wire[15:0]  S_mc_app_wdf_mask;      
+    wire        S_mc_app_wdf_wren;      
+    wire[127:0] S_mc_app_rd_data;       
+    wire        S_mc_app_rd_data_end;   
+    wire        S_mc_app_rd_data_valid; 
+    wire        S_mc_app_rdy;           
+    wire        S_mc_app_wdf_rdy;       
+    wire        S_mc_dbg_fifo_afull;
+    wire        S_mc_dbg_app_rdy;
+    wire        S_mc_dbg_wdf_rdy;
+    wire        S_mc_dbg_cmd_pop;
+
+    wire        S_hdmi_vsync;
+    wire        S_hdmi_hsync;
+    wire        S_hdmi_de;
+    wire        S_hdmi_user;
+    wire        S_hdmi_last;
+    wire        S_video_out_vsync;
+    wire        S_hdmi_window_rd_en;
+    wire        S_hdmi_out_vsync;
+    wire        S_hdmi_out_hsync;
+    wire        S_hdmi_out_de;
+    wire[23:0]  S_hdmi_out_data;
+
+    wire[23:0]  S_video_rd_data;
+    reg         S_dbg_raw_seen;
+    reg         S_dbg_isp_seen;
+    reg         S_dbg_ddr_wr_seen;
+    reg         S_dbg_ddr_rd_seen;
+    reg         S_dbg_cam_cfg_seen;
+    reg         S_dbg_hs_seen;
+    reg         S_dbg_csi_seen;
+    reg         S_dbg_raw10_seen;
+    reg         S_dbg_isp_fs_seen;
+    reg         S_dbg_isp_valid_seen;
+    reg         S_dbg_ddr_req_seen;
+    reg         S_dbg_ddr_ready_seen;
+    reg [1:0]   S_dbg_raw_seen_sync;
+    reg [1:0]   S_dbg_isp_seen_sync;
+    reg [1:0]   S_dbg_ddr_wr_seen_sync;
+    reg [1:0]   S_dbg_ddr_rd_seen_sync;
+    reg [1:0]   S_dbg_cam_cfg_seen_sync;
+    reg [1:0]   S_dbg_hs_seen_sync;
+    reg [1:0]   S_dbg_csi_seen_sync;
+    reg [1:0]   S_dbg_raw10_seen_sync;
+    reg [1:0]   S_dbg_isp_fs_seen_sync;
+    reg [1:0]   S_dbg_isp_valid_seen_sync;
+    reg [1:0]   S_dbg_ddr_req_seen_sync;
+    reg [1:0]   S_dbg_ddr_ready_seen_sync;
+    reg         S_dbg_video_nonzero_seen;
+    reg         S_dbg_rd_req_seen;
+    reg         S_dbg_rd_valid_seen;
+    reg         S_dbg_rd_nonzero_seen;
+    reg [1:0]   S_dbg_rd_req_seen_sync;
+    reg [1:0]   S_dbg_rd_valid_seen_sync;
+    reg [1:0]   S_dbg_rd_nonzero_seen_sync;
+    reg         S_dbg_mc_init_seen;
+    reg         S_dbg_mc_app_rdy_seen;
+    reg         S_dbg_mc_wdf_rdy_seen;
+    reg         S_dbg_mc_cmd_pop_seen;
+    reg [1:0]   S_dbg_mc_init_seen_sync;
+    reg [1:0]   S_dbg_mc_app_rdy_seen_sync;
+    reg [1:0]   S_dbg_mc_wdf_rdy_seen_sync;
+    reg [1:0]   S_dbg_mc_cmd_pop_seen_sync;
+    wire[3:0]   S_hdmi_debug_status;
+    wire        S_lane_error_any;
+
+
+    assign O_screen_pwm = 1'b1;
+    assign S_video_out_vsync = ~S_hdmi_vsync;
+	
+	
+    assign S_rst_n 		= S_pll_lock;
+    assign S_hdmi_rst_n = S_pll_lock;
+
+    always @(posedge S_csi_rx_clk or negedge S_rst_n) begin
+        if(!S_rst_n)
+            S_dbg_raw_seen <= 1'b0;
+        else if(S_raw10_frame_start | S_axis_tvalid)
+            S_dbg_raw_seen <= 1'b1;
+    end
+
+    always @(posedge S_csi_rx_clk or negedge S_rst_n) begin
+        if(!S_rst_n)
+            S_dbg_isp_seen <= 1'b0;
+        else if(S_ISP_O_tuser | S_ISP_O_tvalid)
+            S_dbg_isp_seen <= 1'b1;
+    end
+
+    always @(posedge S_ddr_clk or negedge S_rst_n) begin
+        if(!S_rst_n)
+            S_dbg_ddr_wr_seen <= 1'b0;
+        else if(S_vi_ddr_wr_en)
+            S_dbg_ddr_wr_seen <= 1'b1;
+    end
+
+    always @(posedge S_ddr_clk or negedge S_rst_n) begin
+        if(!S_rst_n)
+            S_dbg_ddr_rd_seen <= 1'b0;
+        else if(S_ddr_user_rd_valid)
+            S_dbg_ddr_rd_seen <= 1'b1;
+    end
+
+    always @(posedge S_24m_clk or negedge S_rst_n) begin
+        if(!S_rst_n)
+            S_dbg_cam_cfg_seen <= 1'b0;
+        else if(S_cam_cfg_done)
+            S_dbg_cam_cfg_seen <= 1'b1;
+    end
+
+    always @(posedge S_csi_rx_clk or negedge S_rst_n) begin
+        if(!S_rst_n)
+            S_dbg_hs_seen <= 1'b0;
+        else if(S_hs_rx_valid)
+            S_dbg_hs_seen <= 1'b1;
+    end
+
+    always @(posedge S_csi_rx_clk or negedge S_rst_n) begin
+        if(!S_rst_n)
+            S_dbg_csi_seen <= 1'b0;
+        else if(S_csi_frame_start | S_csi_valid)
+            S_dbg_csi_seen <= 1'b1;
+    end
+
+    always @(posedge S_csi_rx_clk or negedge S_rst_n) begin
+        if(!S_rst_n)
+            S_dbg_raw10_seen <= 1'b0;
+        else if(S_raw10_frame_start | S_raw10_valid)
+            S_dbg_raw10_seen <= 1'b1;
+    end
+
+    always @(posedge S_csi_rx_clk or negedge S_rst_n) begin
+        if(!S_rst_n)
+            S_dbg_isp_fs_seen <= 1'b0;
+        else if(S_ISP_O_tuser)
+            S_dbg_isp_fs_seen <= 1'b1;
+    end
+
+    always @(posedge S_csi_rx_clk or negedge S_rst_n) begin
+        if(!S_rst_n)
+            S_dbg_isp_valid_seen <= 1'b0;
+        else if(S_ISP_O_tvalid)
+            S_dbg_isp_valid_seen <= 1'b1;
+    end
+
+    always @(posedge S_ddr_clk or negedge S_rst_n) begin
+        if(!S_rst_n)
+            S_dbg_ddr_req_seen <= 1'b0;
+        else if(S_vi_ddr_wr_en)
+            S_dbg_ddr_req_seen <= 1'b1;
+    end
+
+    always @(posedge S_ddr_clk or negedge S_rst_n) begin
+        if(!S_rst_n)
+            S_dbg_ddr_ready_seen <= 1'b0;
+        else if(S_ddr_user_ready)
+            S_dbg_ddr_ready_seen <= 1'b1;
+    end
+
+    always @(posedge S_ddr_clk or negedge S_video_out_rst_n) begin
+        if(!S_video_out_rst_n)
+            S_dbg_rd_req_seen <= 1'b0;
+        else if(S_video_out_vsync)
+            S_dbg_rd_req_seen <= 1'b0;
+        else if(S_vo_ddr_rd_en)
+            S_dbg_rd_req_seen <= 1'b1;
+    end
+
+    always @(posedge S_ddr_clk or negedge S_video_out_rst_n) begin
+        if(!S_video_out_rst_n)
+            S_dbg_rd_valid_seen <= 1'b0;
+        else if(S_video_out_vsync)
+            S_dbg_rd_valid_seen <= 1'b0;
+        else if(S_ddr_user_rd_valid)
+            S_dbg_rd_valid_seen <= 1'b1;
+    end
+
+    always @(posedge S_hdmi_pixel_clk or negedge S_video_out_rst_n) begin
+        if(!S_video_out_rst_n)
+            S_dbg_rd_nonzero_seen <= 1'b0;
+        else if(S_video_out_vsync)
+            S_dbg_rd_nonzero_seen <= 1'b0;
+        else if(S_hdmi_window_rd_en && (S_video_rd_data != 24'd0))
+            S_dbg_rd_nonzero_seen <= 1'b1;
+    end
+
+    always @(posedge S_ddr_clk or negedge S_rst_n) begin
+        if(!S_rst_n)
+            S_dbg_mc_init_seen <= 1'b0;
+        else if(S_init_calib_complete)
+            S_dbg_mc_init_seen <= 1'b1;
+    end
+
+    always @(posedge S_ddr_clk or negedge S_rst_n) begin
+        if(!S_rst_n)
+            S_dbg_mc_app_rdy_seen <= 1'b0;
+        else if(S_mc_dbg_app_rdy)
+            S_dbg_mc_app_rdy_seen <= 1'b1;
+    end
+
+    always @(posedge S_ddr_clk or negedge S_rst_n) begin
+        if(!S_rst_n)
+            S_dbg_mc_wdf_rdy_seen <= 1'b0;
+        else if(S_mc_dbg_wdf_rdy)
+            S_dbg_mc_wdf_rdy_seen <= 1'b1;
+    end
+
+    always @(posedge S_ddr_clk or negedge S_rst_n) begin
+        if(!S_rst_n)
+            S_dbg_mc_cmd_pop_seen <= 1'b0;
+        else if(S_mc_dbg_cmd_pop)
+            S_dbg_mc_cmd_pop_seen <= 1'b1;
+    end
+
+    always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
+        if(!S_hdmi_rst_n) begin
+            S_dbg_cam_cfg_seen_sync <= 2'b00;
+            S_dbg_hs_seen_sync      <= 2'b00;
+            S_dbg_csi_seen_sync     <= 2'b00;
+            S_dbg_raw10_seen_sync   <= 2'b00;
+            S_dbg_raw_seen_sync    <= 2'b00;
+            S_dbg_isp_seen_sync    <= 2'b00;
+            S_dbg_ddr_wr_seen_sync <= 2'b00;
+            S_dbg_ddr_rd_seen_sync <= 2'b00;
+            S_dbg_isp_fs_seen_sync  <= 2'b00;
+            S_dbg_isp_valid_seen_sync <= 2'b00;
+            S_dbg_ddr_req_seen_sync <= 2'b00;
+            S_dbg_ddr_ready_seen_sync <= 2'b00;
+            S_dbg_video_nonzero_seen <= 1'b0;
+            S_dbg_rd_req_seen_sync <= 2'b00;
+            S_dbg_rd_valid_seen_sync <= 2'b00;
+            S_dbg_rd_nonzero_seen_sync <= 2'b00;
+            S_dbg_mc_init_seen_sync <= 2'b00;
+            S_dbg_mc_app_rdy_seen_sync <= 2'b00;
+            S_dbg_mc_wdf_rdy_seen_sync <= 2'b00;
+            S_dbg_mc_cmd_pop_seen_sync <= 2'b00;
+        end
+        else begin
+            S_dbg_cam_cfg_seen_sync <= {S_dbg_cam_cfg_seen_sync[0], S_dbg_cam_cfg_seen};
+            S_dbg_hs_seen_sync      <= {S_dbg_hs_seen_sync[0],      S_dbg_hs_seen};
+            S_dbg_csi_seen_sync     <= {S_dbg_csi_seen_sync[0],     S_dbg_csi_seen};
+            S_dbg_raw10_seen_sync   <= {S_dbg_raw10_seen_sync[0],   S_dbg_raw10_seen};
+            S_dbg_raw_seen_sync    <= {S_dbg_raw_seen_sync[0],    S_dbg_raw_seen};
+            S_dbg_isp_seen_sync    <= {S_dbg_isp_seen_sync[0],    S_dbg_isp_seen};
+            S_dbg_ddr_wr_seen_sync <= {S_dbg_ddr_wr_seen_sync[0], S_dbg_ddr_wr_seen};
+            S_dbg_ddr_rd_seen_sync <= {S_dbg_ddr_rd_seen_sync[0], S_dbg_ddr_rd_seen};
+            S_dbg_isp_fs_seen_sync  <= {S_dbg_isp_fs_seen_sync[0],  S_dbg_isp_fs_seen};
+            S_dbg_isp_valid_seen_sync <= {S_dbg_isp_valid_seen_sync[0], S_dbg_isp_valid_seen};
+            S_dbg_ddr_req_seen_sync <= {S_dbg_ddr_req_seen_sync[0], S_dbg_ddr_req_seen};
+            S_dbg_ddr_ready_seen_sync <= {S_dbg_ddr_ready_seen_sync[0], S_dbg_ddr_ready_seen};
+            S_dbg_rd_req_seen_sync <= {S_dbg_rd_req_seen_sync[0], S_dbg_rd_req_seen};
+            S_dbg_rd_valid_seen_sync <= {S_dbg_rd_valid_seen_sync[0], S_dbg_rd_valid_seen};
+            S_dbg_rd_nonzero_seen_sync <= {S_dbg_rd_nonzero_seen_sync[0], S_dbg_rd_nonzero_seen};
+            S_dbg_mc_init_seen_sync <= {S_dbg_mc_init_seen_sync[0], S_dbg_mc_init_seen};
+            S_dbg_mc_app_rdy_seen_sync <= {S_dbg_mc_app_rdy_seen_sync[0], S_dbg_mc_app_rdy_seen};
+            S_dbg_mc_wdf_rdy_seen_sync <= {S_dbg_mc_wdf_rdy_seen_sync[0], S_dbg_mc_wdf_rdy_seen};
+            S_dbg_mc_cmd_pop_seen_sync <= {S_dbg_mc_cmd_pop_seen_sync[0], S_dbg_mc_cmd_pop_seen};
+            if(S_hdmi_window_rd_en && (S_video_rd_data != 24'd0))
+                S_dbg_video_nonzero_seen <= 1'b1;
+        end
+    end
+
+    assign S_lane_error_any = |S_lane_error;
+
+    assign S_vo_dbg_fifo_rst = 1'b0;
+    assign S_vo_dbg_ddr_rd_valid = 1'b0;
+    assign S_vo_dbg_fifo_rd_en = 1'b0;
+    assign S_vo_dbg_fifo_empty = 1'b0;
+    assign S_mc_dbg_fifo_afull = 1'b0;
+    assign S_mc_dbg_app_rdy = 1'b0;
+    assign S_mc_dbg_wdf_rdy = 1'b0;
+    assign S_mc_dbg_cmd_pop = 1'b0;
+
+    assign S_hdmi_debug_status = {
+        (|S_ddr_user_rd_data),
+        S_ddr_user_rd_valid,
+        S_vo_ddr_rd_en,
+        S_vi_ddr_wr_en
+    };
+	
+	// SC520CS上电后先保持PWDNB/XSHUTDN为低，再释放并等待内部上电完成，
+	// 避免PLL刚锁定就开始I2C初始化而造成寄存器偶发写入失败。
+	always @(posedge S_24m_clk or negedge S_pll_lock) begin
+		if (!S_pll_lock) begin
+			S_cam_power_cnt <= 18'd0;
+			S_cam_pwdnb <= 1'b0;
+			S_cam_i2c_ready <= 1'b0;
+		end else begin
+			if (S_cam_power_cnt < CAM_I2C_START_CYCLES)
+				S_cam_power_cnt <= S_cam_power_cnt + 1'b1;
+			if (S_cam_power_cnt >= CAM_PWDNB_LOW_CYCLES)
+				S_cam_pwdnb <= 1'b1;
+			if (S_cam_power_cnt >= CAM_I2C_START_CYCLES - 1)
+				S_cam_i2c_ready <= 1'b1;
+		end
+	end
+
+	assign O_cam_rst 	= S_cam_pwdnb;
+    assign O_cam_24m 	= S_24m_clk;
+	
+	
+	
+	
+    PLL u_PLL(
+        .refclk      ( I_sys_clk         ),
+        .reset    	 ( ~I_rst_n          ),
+        
+        .clk0_out    ( S_100m_clk        ),
+        .clk1_out    ( S_24m_clk         ),
+
+        .clk4_out    ( S_hdmi_pixel_clk  ),
+        .clk5_out    ( S_hdmi_serial_clk ),
+
+        .lock        ( S_pll_lock        )
+
+    );
+
+
+	
+
+  
+  ae_set u_ae_set (
+      .I_clk(S_24m_clk),
+      .I_rst(~S_rst_n),
+      .I_btn(4'b1111),   // KEY2已让给画面暂停, 手动曝光加减键停用
+      .I_cam_cfg_done(S_cam_cfg_done),
+      .I_ae_cfg_done(S_ae_cfg_done),
+      .O_ae_req(S_ae_req),
+      .O_ae(S_ae),
+      .O_ag(S_ag)
+  );
+  
+    // SC520CS原厂真实HD模式：1280x720@60、RAW10、2-Lane、828 Mbps/Lane。
+    // 当前寄存器表已关闭Slave/FSIN等待，Sensor以free-run方式连续输出。
+    uicfgcs520 #(
+      .CLK_DIV(23809524 / 100000 - 1)
+  ) u_uicfgcs520 (
+      .I_clk(S_24m_clk),  //系统时钟输入
+      .I_rst_n(S_cam_i2c_ready), // SC520CS power-up delay completed
+      .I_ae_req(S_ae_req),
+      .I_ae(S_ae),
+      .I_ag(S_ag),
+      .O_cam_scl(O_cam_scl),  //I2C总线，SCL时钟
+      .IO_cam_sda(IO_cam_sda),  //I2C总线，SDA数据
+      .O_cfg_done(S_cam_cfg_done),  //摄像头寄存器初始化完成
+      .O_ae_cfg_done(S_ae_cfg_done),  //AE配置完成
+      .O_sensor_id(S_cam_sensor_id),
+      .O_sensor_id_ok(S_cam_sensor_id_ok),
+      .O_iic_error(S_cam_i2c_error)
+  );
+	
+    mipi_dphy_rx_ph1p_mipiio_wrapper#(
+        .DPHY_RX_LOCATION      ( "DPHY0" ),
+        .HS_EQUALIZER          ( "3dB"   ),// 828 Mbps/Lane接收均衡
+        .HS_VGA_GAIN           ( "8dB" ),//"-3dB","-1.5dB","0dB","1.5dB","3dB","4.5dB","6dB","7.5dB"
+        .LANE_NUM              ( 2       ),
+        .BYTE_NUM              ( 1       )
+    )u_mipi_dphy_rx_ph1p_mipiio_wrapper(
+        .I_lp_clk              ( S_100m_clk       ),
+        .I_rst                 ( ~S_rst_n         ),
+
+        .I_clk_lane_in_delay   ( 6'd0             ),
+        .I_data_lane0_in_delay ( 6'd0             ),
+        .I_data_lane1_in_delay ( 6'd0             ),
+        .I_data_lane2_in_delay ( 6'd0             ),
+        .I_data_lane3_in_delay ( 6'd0             ),
+
+        .I_lane_invert         ( 4'b0000          ),
+     
+        .O_hs_rx_clk           ( S_csi_rx_clk     ),
+        .O_hs_rx_valid         ( S_hs_rx_valid    ),
+        .O_hs_rx_data          ( S_hs_rx_data     ),
+      
+        .O_lp_rx_lane0_p       (  ),
+        .O_lp_rx_lane0_n       (  ),
+      
+        .I_lp_tx_en            ( 1'b0             ),
+        .I_lp_tx_lane0_p       ( 1'b1             ),
+        .I_lp_tx_lane0_n       ( 1'b1             ),
+      
+        .O_lane_match_error    (                  ),
+        .O_lane_error          ( S_lane_error     ),
+      
+        .IO_rx_clk_pad_n       ( IO_rx_clk_pad_n  ),
+        .IO_rx_clk_pad_p       ( IO_rx_clk_pad_p  ),
+        .IO_rx_data_pad_n      ( IO_rx_data_pad_n ),
+        .IO_rx_data_pad_p      ( IO_rx_data_pad_p )
+    );
+	
+	
+ //  cwc cwc_inst
+ //(
+ //    .probe0(S_hs_rx_valid),
+ //    .probe1(S_hs_rx_data),
+ //    .probe2(S_lane_error),
+ //    .clk(S_csi_rx_clk)
+ //);
+
+ //csi 解码为RAW数据
+csi_unpacket_2lane u_csi_unpacket(
+.I_clk                 ( S_csi_rx_clk       ),
+.I_rst_n               ( S_rst_n        	),
+.I_hs_valid            ( S_hs_rx_valid     ),
+.I_hs_data             ( S_hs_rx_data      ),
+
+.O_csi_frame_start     ( S_csi_frame_start ),
+.O_csi_frame_end       ( S_csi_frame_end   ),
+.O_csi_valid           ( S_csi_valid       ),
+.O_csi_data            ( S_csi_data        )
+);
+
+
+//解码为RAW8
+raw10_unpacket_2lane u_raw10_unpacket (
+.I_clk  (S_csi_rx_clk),
+.I_rst_n(S_rst_n),
+
+.I_csi_frame_start(S_csi_frame_start),
+.I_csi_frame_end  (S_csi_frame_end),
+.I_csi_valid      (S_csi_valid),
+.I_csi_data       (S_csi_data),
+
+.O_raw10_frame_start(S_raw10_frame_start),
+.O_raw10_frame_end  (S_raw10_frame_end),
+.O_raw10_valid      (S_raw10_valid),
+.O_raw10_data       (S_raw10_data)
+  );
+
+
+//将数据转为stream流
+uial2axis #(
+.IMG_WIDTH(1280),
+.IMG_HEIGHT(720),
+.INPUT_DATA_WIDTH(40)
+) 
+u_uial2axis (
+.I_native_clk(S_csi_rx_clk),
+.I_rst_n     (S_rst_n),
+.I_data      (S_raw10_data       ),
+.I_data_valid(S_raw10_valid      ),
+.I_data_start(S_raw10_frame_start),
+.I_data_end  (S_raw10_frame_end  ),
+.axis_tvalid (S_axis_tvalid),
+.axis_tdata  (S_axis_tdata ),
+.axis_tuser  (S_axis_tuser ),
+.axis_tlast  (S_axis_tlast )
+);
+	
+
+// 原厂HD模式直接输出1280x720 RAW10，不再进行FPGA固定窗口裁剪。
+assign S_raw_tdata  = S_axis_tdata;
+assign S_raw_tlast  = S_axis_tlast;
+assign S_raw_tvalid = S_axis_tvalid;
+assign S_raw_tuser  = S_axis_tuser;
+
+
+//cwc1 cwc1_Inst
+//  (
+//      .probe0(S_axis_tuser),
+//      .probe1(S_axis_tvalid),
+//      .probe2(S_axis_tlast),
+//      .probe3(S_axis_tdata),
+//      .probe4(S_ISP_O_tuser),
+//      .probe5(S_ISP_O_tvalid),
+//      .probe6(S_ISP_O_tlast),
+//      .probe7(S_ISP_O_tdata),
+//      .probe8 (S_raw_tdata ),
+//      .probe9 (S_raw_tlast ),
+//      .probe10(S_raw_tvalid),
+//      .probe11(S_raw_tuser ),
+//      .clk(S_csi_rx_clk)
+//  );
+
+
+// ISP 下游恒可就绪: video_in(摄像头侧, 与 isp_top 同 S_csi_rx_clk 域)无 ready 输出,
+// 内部 512 深 FIFO + DDR 写带宽远大于摄像头速率, 持续可吸收数据。
+// 原 S_ISP_O_tready 悬空, 综合器拉 0 (SYN-5013) 会停摆整个 ISP 流水线。
+assign S_ISP_O_tready = 1'b1;
+
+//ISP算法顶层模块
+isp_top u_isp_top (
+.axi4s_video_aclk(S_csi_rx_clk),
+.I_rst_n         (S_rst_n),
+.I_tlast         (S_raw_tlast	),
+.I_tuser         (S_raw_tuser	),
+.I_tdata         (S_raw_tdata	),
+.I_tvalid        (S_raw_tvalid	),
+.I_tdest         (),
+.O_tready        (S_ISP_O_tready),
+.I_edge_key      (1'b1),           // KEY1 已上移至显示域 quad_top(五态循环), ISP 恒出原图
+.O_tdata         (S_ISP_O_tdata ),
+.O_candidate_count(S_candidate_count_cam),
+.O_quad_tdata     (S_quad_tdata_cam ),
+.O_quad_tvalid    (S_quad_tvalid_cam),
+.O_bbox_xmin     (S_bbox_xmin_cam),
+.O_bbox_xmax     (S_bbox_xmax_cam),
+.O_bbox_ymin     (S_bbox_ymin_cam),
+.O_bbox_ymax     (S_bbox_ymax_cam),
+.O_bbox_valid    (S_bbox_valid_cam),
+.O_area          (S_area_cam       ),
+.O_tlast         (S_ISP_O_tlast ),
+.O_tuser         (S_ISP_O_tuser ),
+.O_tvalid        (S_ISP_O_tvalid),
+.I_tready        ()
+  );
+
+
+	// Frame-rate toggle provides a coherent transfer of the stable 20-bit count
+	// and bounding box (数据在帧内稳定, toggle边沿锁存无亚稳态问题).
+reg S_candidate_toggle_cam;
+reg S_candidate_toggle_sync1;
+reg S_candidate_toggle_sync2;
+reg S_candidate_toggle_sync2_d;
+reg [19:0] S_candidate_count_sync;
+reg [21:0] S_bbox_xmin_sync, S_bbox_xmax_sync;
+reg [19:0] S_bbox_ymin_sync, S_bbox_ymax_sync;
+reg [1:0]  S_bbox_valid_sync;
+reg [39:0] S_area_sync;
+always @(posedge S_csi_rx_clk or negedge S_rst_n) begin
+    if(!S_rst_n)
+        S_candidate_toggle_cam <= 1'b0;
+    else if(S_ISP_O_tuser)
+        S_candidate_toggle_cam <= ~S_candidate_toggle_cam;
+end
+always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
+    if(!S_hdmi_rst_n) begin
+        S_candidate_toggle_sync1 <= 1'b0;
+        S_candidate_toggle_sync2 <= 1'b0;
+        S_candidate_toggle_sync2_d <= 1'b0;
+        S_candidate_count_sync <= 20'd0;
+        S_bbox_xmin_sync <= 22'd0; S_bbox_xmax_sync <= 22'd0;
+        S_bbox_ymin_sync <= 20'd0; S_bbox_ymax_sync <= 20'd0;
+        S_bbox_valid_sync <= 2'b0;
+        S_area_sync <= 40'd0;
+    end else begin
+        S_candidate_toggle_sync1 <= S_candidate_toggle_cam;
+        S_candidate_toggle_sync2 <= S_candidate_toggle_sync1;
+        S_candidate_toggle_sync2_d <= S_candidate_toggle_sync2;
+        if(S_candidate_toggle_sync2 != S_candidate_toggle_sync2_d) begin
+            S_candidate_count_sync <= S_candidate_count_cam;
+            S_bbox_xmin_sync <= S_bbox_xmin_cam;
+            S_bbox_xmax_sync <= S_bbox_xmax_cam;
+            S_bbox_ymin_sync <= S_bbox_ymin_cam;
+            S_bbox_ymax_sync <= S_bbox_ymax_cam;
+            S_bbox_valid_sync <= S_bbox_valid_cam;
+            S_area_sync <= S_area_cam;
+        end
+    end
+end
+// 每帧一个脉冲, 作为判定模块的帧结算信号 (与计数锁存同一拍)
+wire S_frame_tick = (S_candidate_toggle_sync2 != S_candidate_toggle_sync2_d);
+
+// ---- 帧级目标有效标志 (连通域面积判定, detect_ccl_96 内 MIN_AREA=64, 上板标定) ----
+// fire: 至少一个红色连通域面积 >= MIN_AREA (bbox_valid两位分别对应面积排序的两个目标),
+//       有框必有警; (连通域检测取代原"候选像素计数>=2"判定: 绿色像素/散点噪声
+//       不形成 >=MIN_AREA 的连通域, 无法触发框选与告警)
+// cig: 小簇带判定废弃 (LED E10 恒灭, L2预留)
+wire S_fire_valid = |S_bbox_valid_sync;
+wire S_cig_valid  = 1'b0;
+
+// ---- 模块1: ALARM告警 (多帧防抖 + 触发保持 + 总告警) ----
+// 防抖30帧(0.5s@60fps)触发, 撤警保持30帧(0.5s); sys_alarm为总告警,
+// snap_trig为总告警上升沿1拍脉冲, 预留作TF卡存图触发
+wire S_snap_trig;
+alarm_module #(
+    .DEBOUNCE (16'd30),
+    .HOLD     (16'd30)
+) u_alarm_module(
+    .I_clk        (S_hdmi_pixel_clk),
+    .I_rst_n      (S_hdmi_rst_n    ),
+    .I_vsync      (S_hdmi_vsync    ),
+    .I_hsync      (S_hdmi_hsync    ),
+    .I_fire_valid (S_fire_valid    ),
+    .I_cig_valid  (S_cig_valid     ),
+    .O_fire_alarm (O_led_fire      ),
+    .O_cig_alarm  (O_led_cig       ),
+    .O_sys_alarm  (O_led_sys       ),
+    .O_snap_trig  (S_snap_trig     )
+);
+
+// ---- detect_judge保留为蜂鸣音型发生器 (国标火警双音交替) ----
+// 触发源 = S_fire_valid 目标检测有效 (bbox, 与OSD ALARM同源);
+// 内部积分锁定0.5s防抖, LED改由alarm_module驱动
+detect_judge u_detect_judge(
+    .I_clk         (S_hdmi_pixel_clk      ),
+    .I_rst_n       (S_hdmi_rst_n          ),
+    .I_frame_tick  (S_frame_tick          ),
+    .I_candidate   (S_candidate_count_sync),
+    .I_fire_valid  (S_fire_valid          ),
+    .O_alarm_fire  (                      ),
+    .O_alarm_cig   (                      ),
+    .O_buzzer      (O_buzzer              )
+);
+// ---- KEY2 画面暂停功能 (I_button[0]=A9=板载KEY2) ----
+	// 按键低有效, 取反后送消抖, 按下沿翻转暂停状态;
+	// 暂停冻结video_in的写/读指针, 显示画面静止, 再按恢复
+    wire S_pause_key_trig;
+    reg  S_display_pause;
+    key_remove_shakes u_pause_key_shakes(
+        .I_clk          (S_hdmi_pixel_clk),
+        .I_rst_n        (S_rst_n         ),
+        .I_key_in       (~I_button[0]    ),
+        .O_key_trig_out (S_pause_key_trig)
+    );
+    always @(posedge S_hdmi_pixel_clk or negedge S_rst_n) begin
+        if(!S_rst_n)
+            S_display_pause <= 1'b0;
+        else if(S_pause_key_trig)
+            S_display_pause <= ~S_display_pause;
+    end
+
+    // 暂停信号两级同步到DDR时钟域(video_in的I_display_pause在该域采样)
+    reg S_display_pause_s1;
+    reg S_display_pause_s2;
+    always @(posedge S_ddr_clk or negedge S_rst_n) begin
+        if(!S_rst_n) begin
+            S_display_pause_s1 <= 1'b0;
+            S_display_pause_s2 <= 1'b0;
+        end
+        else begin
+            S_display_pause_s1 <= S_display_pause;
+            S_display_pause_s2 <= S_display_pause_s1;
+        end
+    end
+
+    // ================= 三用户 DDR 仲裁 (vi写原图 / qw写拼接帧 / vo读显示) =================
+    // 优先级: vi > qw > vo; busy门控使各用户触发条件互斥, 任意两用户 wr/rd 不可能同拍:
+    //   qw_ready 在 vi 使能或 busy 时拉低, vo_ready 再叠加 qw 的 en/busy 掩码 (vo 优先级最低)
+    //   -> wr_en=vi|qw 至多一个为1, 读仅在两写用户都空闲时发生, 无同拍冲突/无死锁
+    // qw 的 ready 掩码含 vi_busy: 防 vi/qw 同拍触发时下一拍同拍 en 丢 qw 字
+    assign S_qw_ddr_wr_ready = S_ddr_user_ready & ~S_vi_ddr_wr_en & ~S_video_in_wr_busy;
+    assign S_vo_ddr_rd_ready = S_ddr_user_ready & ~S_vi_ddr_wr_en & ~S_video_in_wr_busy
+                                                & ~S_qw_ddr_wr_en & ~S_quad_wr_busy;
+
+    // ---- 拼接帧写入 (quad_writer): 相机域收流 -> FIFO -> DDR 空闲区乒乓 ----
+    // 基址十进制 25'd28000000/25'd30000000 (间距2M单位=4MB > 拼接帧1,382,400单位/2.76MB;
+    // 25位地址上限33,554,431, 官方基址 7000000/14000000/21000000 同为十进制)
+    // 帧同步锁相: I_quad_frame_start 与 video_in 同源, 偶帧头复位FIFO+行计数,
+    // 上电相位任意/MIPI丢帧均在下个偶帧头自愈; 每拼接帧写完翻转乒乓指针
+    quad_writer #(
+        .QUAD_BASE_0 (25'd28000000),
+        .QUAD_BASE_1 (25'd30000000)
+    ) u_quad_writer(
+        .I_rst_n            ( S_rst_n            ),
+        .I_quad_clk         ( S_csi_rx_clk       ),
+        .I_quad_valid       ( S_quad_tvalid_cam  ),
+        .I_quad_data        ( S_quad_tdata_cam   ),
+        .I_quad_frame_start ( S_ISP_O_tuser      ),
+        .I_ddr_clk          ( S_ddr_clk          ),
+        .I_vi_wr_busy       ( S_video_in_wr_busy ),
+        .I_vo_rd_busy       ( S_video_out_rd_busy),
+        .I_display_pause    ( S_display_pause_s2 ),   // KEY2暂停: 冻结乒乓翻转, 画面静止
+        .I_ddr_user_ready   ( S_qw_ddr_wr_ready  ),
+        .O_ddr_user_wr_en   ( S_qw_ddr_wr_en     ),
+        .O_ddr_user_addr    ( S_qw_ddr_wr_addr   ),
+        .O_ddr_user_wr_data ( S_qw_ddr_wr_data   ),
+        .O_wr_busy          ( S_quad_wr_busy     ),
+        .O_quad_rp          ( S_quad_rp          )
+    );
+
+    // ---- 四分屏读地址偏移 + 乒乓基址选择 (DDR域) ----
+    // QUAD模式下: vo 读指针固定按 rp=0 行走, 实际地址 = 拼接帧基址(S_quad_rp选) + 行内偏移
+    // (拼接帧布局与 vo 线性读地址完全一致: 1280x720, 行stride=1920, 60fps每拼接帧读两次)
+    // 乒乓翻转发生在拼接帧写完的瞬间, 显示内容恒为完整帧(最多垂直平移数行, 不可见)
+    localparam [24:0] QUAD_BASE_0_LP = 25'd28000000;
+    localparam [24:0] QUAD_BASE_1_LP = 25'd30000000;
+    wire S_quad_mode_hdmi;                        // 驱动源: quad_top (显示域)
+    reg  S_quad_mode_s1, S_quad_mode_ddr;         // 2级同步到 DDR 域
+    always @(posedge S_ddr_clk or negedge S_rst_n) begin
+        if(!S_rst_n) begin
+            S_quad_mode_s1  <= 1'b1;              // 复位默认 QUAD 模式, 与 quad_top 上电一致
+            S_quad_mode_ddr <= 1'b1;
+        end
+        else begin
+            S_quad_mode_s1  <= S_quad_mode_hdmi;
+            S_quad_mode_ddr <= S_quad_mode_s1;
+        end
+    end
+    wire [1:0]  S_vo_rp_eff      = S_quad_mode_ddr ? 2'd0 : S_video_out_rp;
+    wire [24:0] S_vo_rd_addr_eff = S_quad_mode_ddr ?
+                  (S_quad_rp ? QUAD_BASE_1_LP : QUAD_BASE_0_LP) + S_vo_ddr_rd_addr
+                : S_vo_ddr_rd_addr;
+
+    video_in u_video_in(
+        .I_rst_n              (  S_rst_n             ),
+
+        .I_camera_clk         ( S_csi_rx_clk          ),
+        .I_camera_frame_start ( S_ISP_O_tuser  ),
+        .I_camera_valid       ( S_ISP_O_tvalid ),
+        .I_camera_data        ( S_ISP_O_tdata  ),
+        .I_mipi_rx_error      ( 1'b0			      ),
+
+        .I_ddr_clk            ( S_ddr_clk             ),
+		.I_display_pause      ( S_display_pause_s2    ),   // KEY2画面暂停
+        .I_video_out_rd_busy  ( S_video_out_rd_busy | S_quad_wr_busy ),
+        .O_video_in_wr_busy   ( S_video_in_wr_busy    ),
+        .O_video_out_rp       ( S_video_out_rp        ),
+
+        .O_ddr_user_wr_en     ( S_vi_ddr_wr_en        ),
+        .O_ddr_user_addr      ( S_vi_ddr_wr_addr      ),
+        .O_ddr_user_wr_data   ( S_vi_ddr_wr_data      ),
+        .I_ddr_user_ready     ( S_ddr_user_ready      )
+    );
+
+
+
+    assign S_ddr_user_wr_en    = S_vi_ddr_wr_en | S_qw_ddr_wr_en;
+
+    assign S_ddr_user_rd_en    = S_vo_ddr_rd_en;
+
+    assign S_ddr_user_addr     = S_vi_ddr_wr_en ? S_vi_ddr_wr_addr :
+                                 S_qw_ddr_wr_en ? S_qw_ddr_wr_addr :
+                                 S_vo_ddr_rd_en ? S_vo_rd_addr_eff  : 'd0;
+
+    assign S_ddr_user_wr_data  = S_vi_ddr_wr_en ? S_vi_ddr_wr_data  : S_qw_ddr_wr_data;
+
+
+    assign S_video_out_rst_n = S_hdmi_rst_n;
+
+    video_out u_video_out(
+        .I_rst_n             ( S_video_out_rst_n    ),
+        .I_ddr_clk           ( S_ddr_clk            ),
+ 
+        .O_video_out_rd_busy ( S_video_out_rd_busy  ),
+        .I_video_in_wr_busy  ( S_video_in_wr_busy | S_quad_wr_busy ),
+        .I_video_out_rp      ( S_vo_rp_eff         ),
+ 
+        .O_ddr_user_rd_en    ( S_vo_ddr_rd_en       ),
+        .O_ddr_user_addr     ( S_vo_ddr_rd_addr     ),
+        .I_ddr_user_ready    ( S_vo_ddr_rd_ready     ),
+        .I_ddr_user_rd_valid ( S_ddr_user_rd_valid  ),
+        .I_ddr_user_rd_data  ( S_ddr_user_rd_data   ),
+
+        .I_dsi_clk           ( S_hdmi_pixel_clk     ),
+        .I_video_vsync       ( S_video_out_vsync    ),
+        .I_video_rd_en       ( S_hdmi_window_rd_en  ),
+        .O_vdieo_data        ( S_video_rd_data      )
+    );
+
+
+
+    mc_to_user_interface u_mc_to_user_interface(
+        .I_clk                   ( S_ddr_clk               ),
+        .I_rst_n                 ( S_rst_n                 ),
+
+        .I_ddr_user_wr_en        ( S_ddr_user_wr_en        ),
+        .I_ddr_user_rd_en        ( S_ddr_user_rd_en        ),
+        .I_ddr_user_addr         ( S_ddr_user_addr         ),
+        .I_ddr_user_wr_data      ( S_ddr_user_wr_data      ),
+        .O_ddr_user_ready        ( S_ddr_user_ready        ),
+        .O_ddr_user_rd_valid     ( S_ddr_user_rd_valid     ),
+        .O_ddr_user_rd_data      ( S_ddr_user_rd_data      ),
+            
+        .O_mc_app_en             ( S_mc_app_en             ),
+        .O_mc_app_addr           ( S_mc_app_addr           ),
+        .O_mc_app_cmd            ( S_mc_app_cmd            ),
+        .I_mc_app_rdy            ( S_mc_app_rdy            ),
+        .O_mc_app_wdf_wren       ( S_mc_app_wdf_wren       ),
+        .O_mc_app_wdf_data       ( S_mc_app_wdf_data       ),
+        .O_mc_app_wdf_end        ( S_mc_app_wdf_end        ),
+        .O_mc_app_wdf_mask       ( S_mc_app_wdf_mask       ),
+        .I_mc_app_wdf_rdy        ( S_mc_app_wdf_rdy        ),
+        .I_mc_app_rd_data        ( S_mc_app_rd_data        ),
+        .I_mc_app_rd_data_end    ( S_mc_app_rd_data_end    ),
+        .I_mc_app_rd_data_valid  ( S_mc_app_rd_data_valid  )
+    );
+
+
+
+    ph1p35_324_ddr_wrapper u_ph1p35_324_ddr_wrapper(
+        .I_sys_clk              ( I_sys_clk              ),
+        .I_sys_rst_n            ( S_rst_n                ),
+
+        .O_ddr_clk              ( S_ddr_clk              ),
+        .O_init_calib_complete  ( S_init_calib_complete  ),
+        .I_mc_app_addr          ( S_mc_app_addr          ),
+        .I_mc_app_cmd           ( S_mc_app_cmd           ),
+        .I_mc_app_en            ( S_mc_app_en            ),
+        .I_mc_app_wdf_data      ( S_mc_app_wdf_data      ),
+        .I_mc_app_wdf_end       ( S_mc_app_wdf_end       ),
+        .I_mc_app_wdf_mask      ( S_mc_app_wdf_mask      ),
+        .I_mc_app_wdf_wren      ( S_mc_app_wdf_wren      ),
+        .O_mc_app_rd_data       ( S_mc_app_rd_data       ),
+        .O_mc_app_rd_data_end   ( S_mc_app_rd_data_end   ),
+        .O_mc_app_rd_data_valid ( S_mc_app_rd_data_valid ),
+        .O_mc_app_rdy           ( S_mc_app_rdy           ),
+        .O_mc_app_wdf_rdy       ( S_mc_app_wdf_rdy       ),
+
+        .ddr_addr               ( ddr_addr               ),
+        .ddr_ba                 ( ddr_ba                 ),
+        .ddr_cke                ( ddr_cke                ),
+        .ddr_odt                ( ddr_odt                ),
+        .ddr_cs_n               ( ddr_cs_n               ),
+        .ddr_ras_n              ( ddr_ras_n              ),
+        .ddr_cas_n              ( ddr_cas_n              ),
+        .ddr_we_n               ( ddr_we_n               ),
+        .ddr_ck_p               ( ddr_ck_p               ),
+        .ddr_ck_n               ( ddr_ck_n               ),
+        .ddr_dm                 ( ddr_dm                 ),
+        .ddr_dq                 ( ddr_dq                 ),
+        .ddr_dqs_p              ( ddr_dqs_p              ),
+        .ddr_dqs_n              ( ddr_dqs_n              )
+    );
+
+
+
+    uivtc #(
+        .H_ActiveSize ( 1280 ),
+        .H_FrameSize  ( 1650 ),
+        .H_SyncStart  ( 1390 ),
+        .H_SyncEnd    ( 1430 ),
+        .V_ActiveSize ( 720  ),
+        .V_FrameSize  ( 750  ),
+        .V_SyncStart  ( 725  ),
+        .V_SyncEnd    ( 730  )
+    )u_hdmi_vtc(
+        .I_vtc_rstn    ( S_hdmi_rst_n    ),
+        .I_vtc_clk     ( S_hdmi_pixel_clk ),
+        .O_vtc_vs      ( S_hdmi_vsync     ),
+        .O_vtc_hs      ( S_hdmi_hsync     ),
+        .O_vtc_de_valid( S_hdmi_de        ),
+        .O_vtc_user    ( S_hdmi_user      ),
+        .O_vtc_last    ( S_hdmi_last      )
+    );
+
+    hdmi_mixer #(
+        .H_OFFSET   ( 0    ),
+        .V_OFFSET   ( 0    ),
+        .IMG_WIDTH  ( 1280 ),
+        .IMG_HEIGHT ( 720  ),
+        .DEBUG_MODE ( 0    )
+    )u_hdmi_mixer(
+        .I_clk           ( S_hdmi_pixel_clk   ),
+        .I_rst_n         ( S_hdmi_rst_n       ),
+        .I_video_vsync   ( S_hdmi_vsync       ),
+        .I_video_hsync   ( S_hdmi_hsync       ),
+        .I_video_de      ( S_hdmi_de          ),
+        .I_video_user    ( S_hdmi_user        ),
+        .I_video_last    ( S_hdmi_last        ),
+        .I_debug_status  ( S_hdmi_debug_status),
+        .I_candidate_count(S_candidate_count_sync),
+        .O_video_rd_en   ( S_hdmi_window_rd_en),
+        .I_video_rd_data ( S_video_rd_data    ),
+        .O_hdmi_vsync    ( S_hdmi_out_vsync   ),
+        .O_hdmi_hsync    ( S_hdmi_out_hsync   ),
+        .O_hdmi_de       ( S_hdmi_out_de      ),
+        .O_hdmi_data     ( S_hdmi_out_data    )
+    );
+
+    // ========== 模块2: OSD矩形框选 (明火红框/烟头黄框, alpha混合) ==========
+    // 坐标源: color_mask_96候选外接框 (经toggle CDC同步到hdmi域, 帧级锁存)
+    // 双目标(OBJ_MAX=2): 两个红光连通域分别画框, 任一目标有效即触发告警
+    wire [23:0] S_box_rgb;
+    wire [4:0]  S_box_alpha;
+    wire        S_box_de, S_box_hsync, S_box_vsync;
+    wire [1:0]  S_box_valid = S_bbox_valid_sync;
+
+    // 每个目标独立映射: QUAD模式缩小一半并平移到右下象限;
+    // 全屏模式保留摄像头原坐标。每段打包宽度与 osd_box 的端口约定一致。
+    wire [21:0] S_bbox_xmin_eff;
+    wire [21:0] S_bbox_xmax_eff;
+    wire [19:0] S_bbox_ymin_eff;
+    wire [19:0] S_bbox_ymax_eff;
+    genvar box_i;
+    generate
+        for(box_i=0; box_i<2; box_i=box_i+1) begin : GEN_BBOX_MAP
+            wire [10:0] xmin_in = S_bbox_xmin_sync[box_i*11 +: 11];
+            wire [10:0] xmax_in = S_bbox_xmax_sync[box_i*11 +: 11];
+            wire [9:0]  ymin_in = S_bbox_ymin_sync[box_i*10 +: 10];
+            wire [9:0]  ymax_in = S_bbox_ymax_sync[box_i*10 +: 10];
+
+            assign S_bbox_xmin_eff[box_i*11 +: 11] = S_quad_mode_hdmi ?
+                ({1'b0, xmin_in[10:1]} + 11'd640) : xmin_in;
+            assign S_bbox_xmax_eff[box_i*11 +: 11] = S_quad_mode_hdmi ?
+                ({1'b0, xmax_in[10:1]} + 11'd640) : xmax_in;
+            assign S_bbox_ymin_eff[box_i*10 +: 10] = S_quad_mode_hdmi ?
+                ({1'b0, ymin_in[9:1]} + 10'd360) : ymin_in;
+            assign S_bbox_ymax_eff[box_i*10 +: 10] = S_quad_mode_hdmi ?
+                ({1'b0, ymax_in[9:1]} + 10'd360) : ymax_in;
+        end
+    endgenerate
+    osd_box #(
+        .OBJ_MAX  (2),
+        .BORDER_T (4'd4)
+    ) u_osd_box(
+        .I_clk        (S_hdmi_pixel_clk),
+        .I_rst_n      (S_hdmi_rst_n    ),
+        .I_de         (S_hdmi_out_de   ),
+        .I_hsync      (S_hdmi_out_hsync),
+        .I_vsync      (S_hdmi_out_vsync),
+        .I_xmin       (S_bbox_xmin_eff   ),
+        .I_ymin       (S_bbox_ymin_eff   ),
+        .I_xmax       (S_bbox_xmax_eff   ),
+        .I_ymax       (S_bbox_ymax_eff   ),
+        .I_obj_valid  (S_box_valid     ),
+        .I_obj_class  (4'b0101),       // 两个目标均为红光/明火类别(01)
+        .O_osd_pixel  (S_box_rgb       ),
+        .O_osd_alpha  (S_box_alpha     ),
+        .O_de_out     (S_box_de        ),
+        .O_hsync_out  (S_box_hsync     ),
+        .O_vsync_out  (S_box_vsync     )
+    );
+
+    // Alpha混合 (整数运算): out = (video*(16-a) + osd*a + 8) >> 4
+    // 视频延迟1拍, 与osd_box输出同拍对齐 (模块内1拍流水已配平)
+    reg [23:0] S_box_video_d;
+    always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
+        if(!S_hdmi_rst_n)
+            S_box_video_d <= 24'd0;
+        else
+            S_box_video_d <= S_hdmi_out_data;
+    end
+    wire [13:0] S_blend_r_full = ({6'd0, S_box_video_d[23:16]} * (5'd16 - S_box_alpha)) +
+                                 ({6'd0, S_box_rgb[23:16]} * S_box_alpha) + 14'd8;
+    wire [13:0] S_blend_g_full = ({6'd0, S_box_video_d[15:8]}  * (5'd16 - S_box_alpha)) +
+                                 ({6'd0, S_box_rgb[15:8]}  * S_box_alpha) + 14'd8;
+    wire [13:0] S_blend_b_full = ({6'd0, S_box_video_d[7:0]}   * (5'd16 - S_box_alpha)) +
+                                 ({6'd0, S_box_rgb[7:0]}   * S_box_alpha) + 14'd8;
+    wire [23:0] S_blend_rgb = {S_blend_r_full[11:4],
+                               S_blend_g_full[11:4],
+                               S_blend_b_full[11:4]};
+    wire [23:0] S_hdmi_tx_data = S_box_de ? S_blend_rgb : S_box_video_d;
+
+    // ========== 模块3: 告警OSD (检测到目标时屏幕边缘空心红框+右上角红色"ALARM") ==========
+    // 触发源: S_fire_valid = 任一目标有效 (bbox CDC帧级同步, hdmi域稳定)
+    // 端口无 de 输入: 模块内由 hsync/vsync 相位锚定自生成 de (与 osd_box 同域级联)
+    // 接口/流水结构与 osd_box 完全一致, 第二级 alpha 混合叠加在框选之上
+    wire [23:0] S_alarm_rgb;
+    wire [3:0]  S_alarm_alpha;   // 4位: 0=透明 15=不透明, 混合公式 out=(v*(16-a)+osd*a+8)>>4
+    wire        S_alarm_de, S_alarm_hsync, S_alarm_vsync;
+    osd_alarm u_osd_alarm(
+        .I_clk        (S_hdmi_pixel_clk),
+        .I_rst_n      (S_hdmi_rst_n    ),
+        .I_hsync      (S_box_hsync     ),
+        .I_vsync      (S_box_vsync     ),
+        .I_alarm      (S_fire_valid    ),
+        .I_quad_mode  (S_quad_mode_hdmi),   // QUAD模式: ALARM文字1x缩至右下象限
+        .O_osd_pixel  (S_alarm_rgb     ),
+        .O_osd_alpha  (S_alarm_alpha   ),
+        .O_de_out     (S_alarm_de      ),
+        .O_hsync_out  (S_alarm_hsync   ),
+        .O_vsync_out  (S_alarm_vsync   )
+    );
+
+    // 视频延迟1拍, 与告警文字输出同拍对齐 (模块内1拍流水已配平)
+    reg [23:0] S_box_blend_d;
+    always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
+        if(!S_hdmi_rst_n)
+            S_box_blend_d <= 24'd0;
+        else
+            S_box_blend_d <= S_hdmi_tx_data;
+    end
+    // 第二级 Alpha混合 (整数运算): out = (video*(16-a) + osd*a + 8) >> 4
+    wire [13:0] S_blend2_r_full = ({6'd0, S_box_blend_d[23:16]} * (5'd16 - S_alarm_alpha)) +
+                                  ({6'd0, S_alarm_rgb[23:16]} * S_alarm_alpha) + 14'd8;
+    wire [13:0] S_blend2_g_full = ({6'd0, S_box_blend_d[15:8]}  * (5'd16 - S_alarm_alpha)) +
+                                  ({6'd0, S_alarm_rgb[15:8]}  * S_alarm_alpha) + 14'd8;
+    wire [13:0] S_blend2_b_full = ({6'd0, S_box_blend_d[7:0]}   * (5'd16 - S_alarm_alpha)) +
+                                  ({6'd0, S_alarm_rgb[7:0]}   * S_alarm_alpha) + 14'd8;
+    wire [23:0] S_blend2_rgb = {S_blend2_r_full[11:4],
+                                S_blend2_g_full[11:4],
+                                S_blend2_b_full[11:4]};
+    wire [23:0] S_hdmi_tx_data_final = S_alarm_de ? S_blend2_rgb : S_box_blend_d;
+
+    // ========== 模块4: 四分屏/全屏视图 (KEY1 五态循环: QUAD->原图->边缘->掩码->判定) ==========
+    // I_vid_*: 原图流 (hdmi_mixer输出, 3拍); I_det_*: 判定流 (S_alarm_*, 5拍)
+    // 模块内: sobel_disp(原图+2拍)/mask_disp(原图+1拍)/延迟对齐, 四路统一到判定流相位
+    // QUAD模式: 画面来自DDR拼接帧(quad_writer), 本模块仅叠加象限标签/分隔线/模式名
+    // 全屏模式: 4:1 mux 直选对应流, 右上角叠加模式名
+    wire        S_quad_ode, S_quad_ohsync, S_quad_ovsync;
+    wire [23:0] S_quad_odata;
+    quad_top u_quad_top(
+        .I_clk        (S_hdmi_pixel_clk),
+        .I_rst_n      (S_hdmi_rst_n    ),
+        .I_key        (I_button[1]     ),   // KEY1: 五态循环 (低有效, 模块内消抖)
+        .I_vid_de     (S_hdmi_out_de   ),
+        .I_vid_hsync  (S_hdmi_out_hsync),
+        .I_vid_vsync  (S_hdmi_out_vsync),
+        .I_vid_data   (S_hdmi_out_data ),
+        .I_det_de     (S_alarm_de      ),
+        .I_det_hsync  (S_alarm_hsync   ),
+        .I_det_vsync  (S_alarm_vsync   ),
+        .I_det_data   (S_hdmi_tx_data_final),
+        .O_de         (S_quad_ode      ),
+        .O_hsync      (S_quad_ohsync   ),
+        .O_vsync      (S_quad_ovsync   ),
+        .O_data       (S_quad_odata    ),
+        .O_view_mode  (                ),
+        .O_quad_mode  (S_quad_mode_hdmi)
+    );
+
+    hdmi_tx u_hdmi_tx(
+        .I_pixel_clk        ( S_hdmi_pixel_clk  ),
+        .I_serial_clk       ( S_hdmi_serial_clk ),
+        .I_rst              ( ~S_hdmi_rst_n     ),
+        .I_key_in           ( 1'b0              ),
+        .I_edid_read_trig   ( 1'b0              ),
+        .O_edid_read_valid  (                   ),
+        .O_edid_read_data   (                   ),
+        .I_video_rgb_enable ( 1'b1              ),
+        .I_video_in_vs      ( S_quad_ovsync      ),
+        .I_video_in_de      ( S_quad_ode         ),
+        .I_video_in_user    ( 1'b0              ),
+        .I_video_in_valid   ( 1'b0              ),
+        .I_video_in_last    ( 1'b0              ),
+        .O_video_in_ready   (                   ),
+        .I_video_in_data    ( S_quad_odata       ),
+        .I_audio_valid      ( 1'b0              ),
+        .I_audio_left_data  ( 24'd0             ),
+        .I_audio_right_data ( 24'd0             ),
+        .I_i2s_BCLK         ( 1'b0              ),
+        .I_i2s_LRCK         ( 1'b0              ),
+        .I_i2s_DOUT         ( 1'b0              ),
+        .O_ddc_scl          (                   ),
+        .O_hdmi_clk_p       (                   ),
+        .O_hdmi_tx_p        (                   ),
+        .O_tmds_ch0_p       ( O_tmds_ch0_p      ),
+        .O_tmds_ch1_p       ( O_tmds_ch1_p      ),
+        .O_tmds_ch2_p       ( O_tmds_ch2_p      ),
+        .O_tmds_clk_p       ( O_tmds_clk_p      )
+    );
+
+
+    
+endmodule
