@@ -39,7 +39,16 @@ module design_top_wrapper (
     inout wire[1:0]   ddr_dm,
     inout wire[15:0]  ddr_dq,
     inout wire[1:0]   ddr_dqs_p,
-    inout wire[1:0]   ddr_dqs_n   
+    inout wire[1:0]   ddr_dqs_n,
+
+    // TF卡 SD (SPI模式): SD_nCS=SD_DAT3(B12), SD_DCLK=SD_CLK(A7), SD_MOSI=SD_CMD(A8), SD_MISO=SD_DAT0(E8)
+    output wire       SD_nCS,
+    output wire       SD_DCLK,
+    output wire       SD_MOSI,
+    input  wire       SD_MISO,
+
+    // UART 调试输出 (TX=H1)
+    output wire       O_uart_tx
 );
 
 
@@ -659,6 +668,10 @@ isp_top u_isp_top (
 .O_bbox_ymax     (S_bbox_ymax_cam),
 .O_bbox_valid    (S_bbox_valid_cam),
 .O_area          (S_area_cam       ),
+.O_fire_valid    (S_fire_valid_cam ),
+.O_snap_tdata    (S_snap_tdata     ),
+.O_snap_tuser    (S_snap_tuser     ),
+.O_snap_tvalid   (S_snap_tvalid    ),
 .O_tlast         (S_ISP_O_tlast ),
 .O_tuser         (S_ISP_O_tuser ),
 .O_tvalid        (S_ISP_O_tvalid),
@@ -689,6 +702,16 @@ end
 
 	// Frame-rate toggle provides a coherent transfer of the stable 20-bit count
 	// and bounding box (数据在帧内稳定, toggle边沿锁存无亚稳态问题).
+wire         S_fire_valid_cam;   // 融合火情判定 (isp_top.O_fire_valid, csi域帧级)
+reg          S_fire_valid_sync;  // 同步到 hdmi 域
+wire [95:0]  S_snap_tdata;       // AWB 流 (TF卡告警快照源)
+wire         S_snap_tuser, S_snap_tvalid;
+wire         S_sec_write;        // snap_store <-> sd_card_top 扇区写握手
+wire [31:0]  S_sec_addr;
+wire [7:0]   S_sec_data;
+wire         S_sec_data_req, S_sec_write_end;
+(* keep = "true" *) reg [15:0] S_latency_cam;  // ISP流水线时延 (csi域拍数)
+reg [15:0]  S_lat_cnt;
 reg S_candidate_toggle_cam;
 reg S_candidate_toggle_sync1;
 reg S_candidate_toggle_sync2;
@@ -714,6 +737,7 @@ always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
         S_bbox_ymin_sync <= 20'd0; S_bbox_ymax_sync <= 20'd0;
         S_bbox_valid_sync <= 2'b0;
         S_area_sync <= 40'd0;
+        S_fire_valid_sync <= 1'b0;
     end else begin
         S_candidate_toggle_sync1 <= S_candidate_toggle_cam;
         S_candidate_toggle_sync2 <= S_candidate_toggle_sync1;
@@ -726,6 +750,7 @@ always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
             S_bbox_ymax_sync <= S_bbox_ymax_cam;
             S_bbox_valid_sync <= S_bbox_valid_cam;
             S_area_sync <= S_area_cam;
+            S_fire_valid_sync <= S_fire_valid_cam;
         end
     end
 end
@@ -737,7 +762,7 @@ wire S_frame_tick = (S_candidate_toggle_sync2 != S_candidate_toggle_sync2_d);
 //       有框必有警; (连通域检测取代原"候选像素计数>=2"判定: 绿色像素/散点噪声
 //       不形成 >=MIN_AREA 的连通域, 无法触发框选与告警)
 // cig: 小簇带判定废弃 (LED E10 恒灭, L2预留)
-wire S_fire_valid = |S_bbox_valid_sync;
+wire S_fire_valid = S_fire_valid_sync;   // 融合判定 (feature_fuse, 经CDC同步)
 wire S_cig_valid  = 1'b0;
 
 // ---- 模块1: ALARM告警 (多帧防抖 + 触发保持 + 总告警) ----
@@ -773,6 +798,97 @@ detect_judge u_detect_judge(
     .O_alarm_cig   (                      ),
     .O_buzzer      (O_buzzer              )
 );
+
+// ---- 模块: TF卡告警快照 (snap_store 缩略图+日志 -> sd_card_top 环形裸扇区) ----
+// 全旁路: 不插入视频数据通路, SD异常不影响显示/检测/告警主功能。
+reg  S_snap_trig_stretch;
+reg  [3:0] S_snap_stretch_cnt;
+always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
+    if(!S_hdmi_rst_n) begin
+        S_snap_trig_stretch <= 1'b0;
+        S_snap_stretch_cnt  <= 4'd0;
+    end else if(S_snap_trig) begin
+        S_snap_trig_stretch <= 1'b1;
+        S_snap_stretch_cnt  <= 4'd0;
+    end else if(S_snap_trig_stretch) begin
+        if(S_snap_stretch_cnt == 4'd15) S_snap_trig_stretch <= 1'b0;
+        else S_snap_stretch_cnt <= S_snap_stretch_cnt + 1'b1;
+    end
+end
+
+snap_store u_snap_store(
+    .I_clk        (S_csi_rx_clk         ),
+    .I_rst_n      (S_rst_n              ),
+    .I_tuser      (S_snap_tuser         ),
+    .I_tvalid     (S_snap_tvalid        ),
+    .I_tdata      (S_snap_tdata         ),
+    .I_snap_trig  (S_snap_trig_stretch  ),
+    .I_fire_valid (|S_bbox_valid_cam    ),
+    .I_cig_valid  (1'b0                 ),
+    .I_fire_area  (S_area_cam[19:0]     ),
+    .I_cig_count  (20'd0                ),
+    .I_fxmin      (S_bbox_xmin_cam[10:0]),
+    .I_fxmax      (S_bbox_xmax_cam[10:0]),
+    .I_fymin      (S_bbox_ymin_cam[9:0] ),
+    .I_fymax      (S_bbox_ymax_cam[9:0] ),
+    .I_cxmin      (11'd0                ),
+    .I_cxmax      (11'd0                ),
+    .I_cymin      (10'd0                ),
+    .I_cymax      (10'd0                ),
+    .O_sec_write  (S_sec_write          ),
+    .O_sec_addr   (S_sec_addr           ),
+    .O_sec_data   (S_sec_data           ),
+    .I_data_req   (S_sec_data_req       ),
+    .I_write_end  (S_sec_write_end      )
+);
+sd_card_top #(
+    .SPI_LOW_SPEED_DIV  (248),
+    .SPI_HIGH_SPEED_DIV (1)
+) u_sd_card_top(
+    .clk                  (S_csi_rx_clk    ),
+    .rst                  (~S_rst_n        ),
+    .SD_nCS               (SD_nCS          ),
+    .SD_DCLK              (SD_DCLK         ),
+    .SD_MOSI              (SD_MOSI         ),
+    .SD_MISO              (SD_MISO         ),
+    .sd_init_done         (),
+    .sd_sec_read          (1'b0            ),
+    .sd_sec_read_addr     (32'd0           ),
+    .sd_sec_read_data     (),
+    .sd_sec_read_data_valid(),
+    .sd_sec_read_end      (),
+    .sd_sec_write         (S_sec_write     ),
+    .sd_sec_write_addr    (S_sec_addr      ),
+    .sd_sec_write_data    (S_sec_data      ),
+    .sd_sec_write_data_req(S_sec_data_req  ),
+    .sd_sec_write_end     (S_sec_write_end )
+);
+
+// ---- 模块: UART 调试输出 (检测状态每秒一行) ----
+uart_debug u_uart_debug(
+    .I_clk        (S_hdmi_pixel_clk),
+    .I_rst_n      (S_hdmi_rst_n    ),
+    .I_frame_tick (S_frame_tick    ),
+    .I_fire_valid (S_fire_valid    ),
+    .I_cig_valid  (1'b0            ),
+    .I_lum_th     (8'd0            ),
+    .O_tx_pin     (O_uart_tx       )
+);
+
+// ---- 时延量化: ISP 输入帧头 -> ISP 输出帧头 的拍数 (csi时钟域) ----
+always @(posedge S_csi_rx_clk or negedge S_rst_n) begin
+    if(!S_rst_n) begin
+        S_lat_cnt     <= 16'd0;
+        S_latency_cam <= 16'd0;
+    end else if(S_raw_tuser) begin
+        S_lat_cnt <= 16'd0;
+    end else if(S_ISP_O_tuser) begin
+        S_latency_cam <= S_lat_cnt;
+        S_lat_cnt     <= 16'd0;
+    end else begin
+        S_lat_cnt <= S_lat_cnt + 16'd1;
+    end
+end
 // ---- K3/K4 专用于面积门槛减/加；K1视图切换、K2画面暂停保持原功能 ----
     wire S_pause_key_trig;
     reg S_area_down_trig;

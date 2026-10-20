@@ -15,3 +15,5 @@ _synthesis/
 _implementation/
 .DS_Store
 Thumbs.db
+tf_out/
+transcript

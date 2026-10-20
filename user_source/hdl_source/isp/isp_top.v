@@ -22,6 +22,10 @@ module isp_top (
     output [19:0]   O_bbox_ymax,
     output [1:0]    O_bbox_valid,    // bit i = 第i大目标有效
     output [39:0]   O_area,          // [i*20+:20] = 第i大目标面积 (标定观察)
+    output          O_fire_valid,    // 四维融合火情判定 (feature_fuse, 帧级)
+    output [95:0]   O_snap_tdata,    // AWB RGB888 96bit 流 (TF卡告警快照源)
+    output          O_snap_tuser,
+    output          O_snap_tvalid,
     output 			O_tlast			,
     output 			O_tuser			,
     output 			O_tvalid		,
@@ -54,6 +58,10 @@ wire         m_aixs_tvalid;  //synthesis keep
   wire [95:0]   mask_O_tdata;
   wire         mask_O_tvalid;
   wire [3:0]    mask_candidate;
+  wire [29:0]   mask_cand_edge_sum;  // 候选区边缘能量 (color_mask -> feature_fuse)
+  wire [29:0]   mask_luma_sum;       // 场景亮度 (color_mask -> feature_fuse)
+  wire [19:0]   fuse_min_area;       // 自适应面积阈值 (feature_fuse -> detect_ccl)
+  wire          fuse_fire_valid;     // 融合判定 (feature_fuse -> 顶层)
 
   wire         awb_O_tuser_128;  //synthesis keep
   wire         awb_O_tvalid_128;  //synthesis keep
@@ -193,7 +201,9 @@ color_mask_96 #(
     .O_tdata        (mask_O_tdata),
     .O_tvalid       (mask_O_tvalid),
     .O_frame_count  (O_candidate_count),
-    .O_candidate    (mask_candidate)
+    .O_candidate    (mask_candidate),
+    .O_cand_edge_sum(mask_cand_edge_sum),
+    .O_luma_sum     (mask_luma_sum)
 );
 // ---- 连通域检测: 红色候选 → 多目标外接框+面积 ----
 // 4邻域 union-find 合并, 按面积降序输出全部达标连通域 (MAX_OBJ=2);
@@ -219,7 +229,7 @@ detect_ccl_96 #(
     .I_tuser      (awb_O_tuser),
     .I_tlast      (awb_O_tlast),
     .I_tvalid     (awb_O_tvalid),
-    .I_min_area   (S_min_area_frame),
+    .I_min_area   (fuse_min_area),
     .O_bbox_xmin  (O_bbox_xmin),
     .O_bbox_xmax  (O_bbox_xmax),
     .O_bbox_ymin  (O_bbox_ymin),
@@ -227,6 +237,24 @@ detect_ccl_96 #(
     .O_bbox_valid (O_bbox_valid),
     .O_area       (O_area)
 );
+// ---- 四维特征帧级融合: 候选数/边缘能量/亮度 -> 自适应面积阈值 + 火情判定 ----
+// I_area_base 接 S_min_area_frame (按键K3/K4手动门槛的帧锁存值), 自适应在其上叠加
+feature_fuse u_feature_fuse(
+    .I_clk            (axi4s_video_aclk),
+    .I_rst_n          (I_rst_n),
+    .I_tuser          (awb_O_tuser),
+    .I_candidate_count(O_candidate_count),
+    .I_cand_edge_sum  (mask_cand_edge_sum),
+    .I_luma_sum       (mask_luma_sum),
+    .I_bbox_valid     (O_bbox_valid),
+    .I_area_base      (S_min_area_frame),
+    .O_min_area       (fuse_min_area),
+    .O_fire_valid     (fuse_fire_valid)
+);
+assign O_fire_valid = fuse_fire_valid;
+assign O_snap_tdata  = awb_O_tdata;
+assign O_snap_tuser  = awb_O_tuser;
+assign O_snap_tvalid = awb_O_tvalid;
 // ---- 边缘检测 (lab_ex2功能, 与原图通路并行运行) ----
 edge_detect_96 #(
     .IMG_WIDTH (1280),
