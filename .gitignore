@@ -17,3 +17,5 @@ _implementation/
 Thumbs.db
 tf_out/
 transcript
+__pycache__/
+*.pyc
