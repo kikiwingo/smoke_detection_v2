@@ -60,6 +60,7 @@ wire         m_aixs_tvalid;  //synthesis keep
   wire [3:0]    mask_candidate;
   wire [29:0]   mask_cand_edge_sum;  // 候选区边缘能量 (color_mask -> feature_fuse)
   wire [29:0]   mask_luma_sum;       // 场景亮度 (color_mask -> feature_fuse)
+  wire [29:0]   mask_cand_sat_sum;   // 候选区饱和度 (color_mask -> feature_fuse)
   wire [19:0]   fuse_min_area;       // 自适应面积阈值 (feature_fuse -> detect_ccl)
   wire          fuse_fire_valid;     // 融合判定 (feature_fuse -> 顶层)
 
@@ -203,7 +204,8 @@ color_mask_96 #(
     .O_frame_count  (O_candidate_count),
     .O_candidate    (mask_candidate),
     .O_cand_edge_sum(mask_cand_edge_sum),
-    .O_luma_sum     (mask_luma_sum)
+    .O_luma_sum     (mask_luma_sum),
+    .O_cand_sat_sum (mask_cand_sat_sum)
 );
 // ---- 连通域检测: 红色候选 → 多目标外接框+面积 ----
 // 4邻域 union-find 合并, 按面积降序输出全部达标连通域 (MAX_OBJ=2);
@@ -246,6 +248,7 @@ feature_fuse u_feature_fuse(
     .I_candidate_count(O_candidate_count),
     .I_cand_edge_sum  (mask_cand_edge_sum),
     .I_luma_sum       (mask_luma_sum),
+    .I_cand_sat_sum   (mask_cand_sat_sum),
     .I_bbox_valid     (O_bbox_valid),
     .I_area_base      (S_min_area_frame),
     .O_min_area       (fuse_min_area),

@@ -36,8 +36,13 @@ module feature_fuse #(
     parameter [9:0]  DARK_REF   = 10'd128,    // 参考亮度 (sum>>20 单位, 低于此视为暗光)
     parameter [7:0]  DARK_GAIN  = 8'd1,       // 暗光补偿增益
     parameter [3:0]  DARK_SHIFT = 4'd0,       // 暗光补偿移位
+    parameter [9:0]  BRIGHT_REF   = 10'd384,  // 强光参考亮度 (高于此视为强光, 升阈防误检)
+    parameter [7:0]  BRIGHT_GAIN  = 8'd1,     // 强光补偿增益
+    parameter [3:0]  BRIGHT_SHIFT = 4'd2,     // 强光补偿移位 (>>2, 缩放1/4, 待标定)
     parameter [7:0]  EDGE_NUM   = 8'd8,       // 边缘门: 候选平均梯度 >= EDGE_NUM/2^EDGE_SHIFT
     parameter [3:0]  EDGE_SHIFT = 4'd0,       // 边缘门移位 (默认 8/1 = 8.0)
+    parameter [7:0]  SAT_NUM    = 8'd40,      // 饱和度门: 候选平均饱和度 >= SAT_NUM/2^SAT_SHIFT (火焰高饱和, 洗白/肤色低饱和)
+    parameter [3:0]  SAT_SHIFT  = 4'd0,       // 饱和度门移位 (默认 40/1 = 40, 待标定)
     parameter [19:0] COLOR_MIN  = 20'd16,     // 颜色门: 候选数下限 (必须 <= AREA_MIN, 否则与自适应面积阈值下限冲突; 候选数恒>=最大连通域面积, 故该门是面积门的冗余下界)
     parameter [7:0]  FLICKER_NUM   = 8'd1,    // 闪烁门: 候选数帧间变化率 >= FLICKER_NUM/2^FLICKER_SHIFT
     parameter [3:0]  FLICKER_SHIFT = 4'd4     // 闪烁门移位 (默认 1/16 = 6.25% 帧间变化)
@@ -48,6 +53,7 @@ module feature_fuse #(
     input  wire [19:0] I_candidate_count,
     input  wire [29:0] I_cand_edge_sum,
     input  wire [29:0] I_luma_sum,
+    input  wire [29:0] I_cand_sat_sum,   // 候选区饱和度 (color_mask_96.O_cand_sat_sum)
     input  wire [1:0]  I_bbox_valid,
     input  wire [19:0] I_area_base,   // 手动面积门槛基值 (来自按键 K3/K4, 复位默认64)
     output reg  [19:0] O_min_area,
@@ -70,15 +76,19 @@ module feature_fuse #(
     // ---- 帧级 IIR (1 极点 EMA, 直流增益1, 移位系数) ----
     reg [19:0] cand_iir;
     reg [29:0] edge_iir;
+    reg [29:0] sat_iir;
     reg [9:0]  luma_iir;
     wire [19:0] cand_iir_next = cand_iir - (cand_iir >> IIR_SHIFT) + (I_candidate_count >> IIR_SHIFT);
     wire [29:0] edge_iir_next = edge_iir - (edge_iir >> IIR_SHIFT) + (I_cand_edge_sum >> IIR_SHIFT);
+    wire [29:0] sat_iir_next  = sat_iir  - (sat_iir  >> IIR_SHIFT) + (I_cand_sat_sum >> IIR_SHIFT);
     wire [9:0]  luma_iir_next = luma_iir - (luma_iir >> IIR_SHIFT) + (luma_raw >> IIR_SHIFT);
 
-    // ---- 自适应面积阈值 (暗光降阈; 亮场即手动门槛, 无升阈) ----
-    wire [9:0]  dark_boost = (luma_iir_next < DARK_REF) ? (DARK_REF - luma_iir_next) : 10'd0;
-    wire [19:0] area_sub   = ({10'd0, dark_boost} * DARK_GAIN) >> DARK_SHIFT;  // 显式加宽防截断
-    wire [19:0] area_raw   = (area_sub >= I_area_base) ? 20'd0 : (I_area_base - area_sub);
+    // ---- 自适应面积阈值 (暗光降阈防漏检 / 强光升阈防误检) ----
+    wire [9:0]  dark_boost   = (luma_iir_next < DARK_REF)   ? (DARK_REF   - luma_iir_next) : 10'd0;
+    wire [9:0]  bright_boost = (luma_iir_next > BRIGHT_REF) ? (luma_iir_next - BRIGHT_REF) : 10'd0;
+    wire [19:0] area_sub     = ({10'd0, dark_boost}   * DARK_GAIN)   >> DARK_SHIFT;   // 显式加宽防截断
+    wire [19:0] area_add     = ({10'd0, bright_boost} * BRIGHT_GAIN) >> BRIGHT_SHIFT;
+    wire [19:0] area_raw     = (area_sub >= I_area_base + area_add) ? 20'd0 : (I_area_base + area_add - area_sub);
     wire [19:0] area_clamped = (area_raw < AREA_MIN) ? AREA_MIN :
                                (area_raw > AREA_MAX) ? AREA_MAX : area_raw;
 

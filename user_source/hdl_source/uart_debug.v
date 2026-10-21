@@ -1,8 +1,8 @@
 // ============================================================
 // uart_debug.v - 检测状态 UART 调试输出 (每秒一行)
 // 时钟: hdmi 像素时钟域 (74.25MHz)
-// 格式 (12字节, 每秒一次): "F0 C0 T150\r\n"
-//   F<0/1> = 明火有效   C<0/1> = 烟头有效   T<3位十进制> = 烟头阈值 LUM_TH
+// 格式 (24字节, 每秒一次): "F0 C0 T150 P060 L01234\r\n"
+//   F<0/1> = 明火有效   C<0/1> = 烟头有效   T<3位> = 烟头阈值   P<3位> = 帧率 fps   L<5位> = ISP段时延
 // 复用官方 uart_tx.v (115200, 8N1), 输出接板子 UART TX (H1)。
 // 用途: 上位机/串口终端实时监控检测状态, 便于场景标定与记录。
 // ============================================================
@@ -13,6 +13,8 @@ module uart_debug (
     input  wire        I_fire_valid,   // 明火有效
     input  wire        I_cig_valid,    // 烟头有效
     input  wire [7:0]  I_lum_th,       // 烟头阈值
+    input  wire [6:0]  I_fps,          // 帧率 (fps)
+    input  wire [15:0] I_latency,      // ISP段时延 (csi域拍数)
     output wire        O_tx_pin
 );
 
@@ -51,7 +53,27 @@ module uart_debug (
             bin8_bcd = sh[19:8];
         end
     endfunction
+    // ---- 16bit 二进制 -> 5位十进制 BCD (组合 double-dabble) ----
+    function [19:0] bin16_bcd;
+        input [15:0] bin;
+        reg [35:0] sh;
+        integer i;
+        begin
+            sh = {20'b0, bin};
+            for(i=0; i<16; i=i+1) begin
+                if(sh[35:32] >= 5) sh[35:32] = sh[35:32] + 4'd3;
+                if(sh[31:28] >= 5) sh[31:28] = sh[31:28] + 4'd3;
+                if(sh[27:24] >= 5) sh[27:24] = sh[27:24] + 4'd3;
+                if(sh[23:20] >= 5) sh[23:20] = sh[23:20] + 4'd3;
+                if(sh[19:16] >= 5) sh[19:16] = sh[19:16] + 4'd3;
+                sh = sh << 1;
+            end
+            bin16_bcd = sh[35:16];
+        end
+    endfunction
     wire [11:0] th_bcd = bin8_bcd(I_lum_th);
+    wire [11:0] fps_bcd = bin8_bcd({1'b0, I_fps});   // 7bit -> 3位十进制
+    wire [19:0] latency_bcd = bin16_bcd(I_latency);  // 16bit -> 5位十进制
 
     // ---- 当前发送字节内容 (组合) ----
     reg [3:0] byte_idx;
@@ -72,8 +94,20 @@ module uart_debug (
             4'd7:  tx_data = 8'h30 + th_bcd[11:8];     // 阈值百位
             4'd8:  tx_data = 8'h30 + th_bcd[7:4];      // 十位
             4'd9:  tx_data = 8'h30 + th_bcd[3:0];      // 个位
-            4'd10: tx_data = 8'h0D;                    // '\r'
-            4'd11: tx_data = 8'h0A;                    // '\n'
+            4'd10: tx_data = 8'h20;                    // ' '
+            4'd11: tx_data = 8'h50;                    // 'P'
+            4'd12: tx_data = 8'h30 + fps_bcd[11:8];    // 帧率百位
+            4'd13: tx_data = 8'h30 + fps_bcd[7:4];     // 十位
+            4'd14: tx_data = 8'h30 + fps_bcd[3:0];     // 个位
+            4'd15: tx_data = 8'h20;                    // ' '
+            4'd16: tx_data = 8'h4C;                    // 'L'
+            4'd17: tx_data = 8'h30 + latency_bcd[19:16]; // 时延万位
+            4'd18: tx_data = 8'h30 + latency_bcd[15:12]; // 千位
+            4'd19: tx_data = 8'h30 + latency_bcd[11:8];  // 百位
+            4'd20: tx_data = 8'h30 + latency_bcd[7:4];   // 十位
+            4'd21: tx_data = 8'h30 + latency_bcd[3:0];   // 个位
+            4'd22: tx_data = 8'h0D;                    // '\r'
+            4'd23: tx_data = 8'h0A;                    // '\n'
             default: tx_data = 8'h00;
         endcase
     end
@@ -91,7 +125,7 @@ module uart_debug (
                 byte_idx <= 4'd0;
                 tx_valid <= 1'b1;
             end else if(sending && byte_accepted) begin
-                if(byte_idx == 4'd11) begin
+                if(byte_idx == 4'd23) begin
                     sending  <= 1'b0;
                     tx_valid <= 1'b0;
                 end else begin

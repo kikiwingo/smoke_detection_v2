@@ -721,6 +721,7 @@ reg [21:0] S_bbox_xmin_sync, S_bbox_xmax_sync;
 reg [19:0] S_bbox_ymin_sync, S_bbox_ymax_sync;
 reg [1:0]  S_bbox_valid_sync;
 reg [39:0] S_area_sync;
+reg [15:0] S_latency_sync;   // ISP段时延 (csi域拍数, 经toggle握手同步到hdmi域)
 always @(posedge S_csi_rx_clk or negedge S_rst_n) begin
     if(!S_rst_n)
         S_candidate_toggle_cam <= 1'b0;
@@ -738,6 +739,7 @@ always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
         S_bbox_valid_sync <= 2'b0;
         S_area_sync <= 40'd0;
         S_fire_valid_sync <= 1'b0;
+        S_latency_sync <= 16'd0;
     end else begin
         S_candidate_toggle_sync1 <= S_candidate_toggle_cam;
         S_candidate_toggle_sync2 <= S_candidate_toggle_sync1;
@@ -751,11 +753,34 @@ always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
             S_bbox_valid_sync <= S_bbox_valid_cam;
             S_area_sync <= S_area_cam;
             S_fire_valid_sync <= S_fire_valid_cam;
+            S_latency_sync <= S_latency_cam;
         end
     end
 end
 // 每帧一个脉冲, 作为判定模块的帧结算信号 (与计数锁存同一拍)
 wire S_frame_tick = (S_candidate_toggle_sync2 != S_candidate_toggle_sync2_d);
+
+// ---- 帧率量化: 1 秒窗口内计数帧 tick -> 整数 fps (S_hdmi_pixel_clk = 74.25MHz) ----
+reg [26:0] S_fps_win_cnt;   // 1秒窗口计数器 (74.25M 拍, 27bit)
+reg [6:0]  S_fps_cnt;       // 窗口内帧计数
+reg [6:0]  S_fps_reg;       // 锁存的帧率 (fps, 供 UART/OSD 输出)
+always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
+    if(!S_hdmi_rst_n) begin
+        S_fps_win_cnt <= 27'd0;
+        S_fps_cnt     <= 7'd0;
+        S_fps_reg     <= 7'd0;
+    end else begin
+        if(S_frame_tick)
+            S_fps_cnt <= S_fps_cnt + 7'd1;
+        if(S_fps_win_cnt == 27'd74250000 - 27'd1) begin
+            S_fps_win_cnt <= 27'd0;
+            S_fps_reg     <= S_fps_cnt;
+            S_fps_cnt     <= 7'd0;
+        end else begin
+            S_fps_win_cnt <= S_fps_win_cnt + 27'd1;
+        end
+    end
+end
 
 // ---- 帧级目标有效标志 (连通域面积判定, 阈值默认64并支持按键调节) ----
 // fire: 至少一个红色连通域面积 >= MIN_AREA (bbox_valid两位分别对应面积排序的两个目标),
@@ -872,6 +897,8 @@ uart_debug u_uart_debug(
     .I_fire_valid (S_fire_valid    ),
     .I_cig_valid  (1'b0            ),
     .I_lum_th     (8'd0            ),
+    .I_fps        (S_fps_reg       ),
+    .I_latency    (S_latency_sync  ),
     .O_tx_pin     (O_uart_tx       )
 );
 

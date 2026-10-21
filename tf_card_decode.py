@@ -1,37 +1,37 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 r"""
-TF 卡告警快照解码器 (RGB332 彩色版)
+TF 卡告警快照解码器 (RGB565 彩色版)
 ====================================
 读取 SD 卡(或 dd/Win32DiskImager 导出的 .img 镜像)的裸扇区, 解析 snap_store.v
 写入的告警快照:
 
-  每次告警占 114 个扇区(从扇区 8 开始, 环形 1824 扇区 = 最多 16 次告警):
+  每次告警占 121 个扇区(从扇区 8 开始, 环形 1936 扇区 = 最多 16 次告警):
     扇区 N        : 512B 二进制日志(魔数/帧号/明火面积/烟头计数/包围盒/类型标志)
-    扇区 N+1..N+113: 缩略图 (320x180 RGB332 = 57600 字节, 最后 256 字节为 0xFF 填充)
+    扇区 N+1..N+120: 缩略图 (256x120 RGB565 = 61440 字节, 无填充)
 
-  缩略图每个字节是 RGB332 (3bit红/3bit绿/2bit蓝), 本脚本解包成 RGB888 彩色图。
+  缩略图每个像素是 RGB565 (5bit红/6bit绿/5bit蓝, 65536 色), 本脚本解包成 RGB888。
 
 输出:
-  1. 每张缩略图放大为彩色 PNG (文件名 thumb_XX.png, 默认放大 4 倍 -> 1280x720)
+  1. 每张缩略图放大为彩色 PNG (默认 5 倍 -> 1280x720, 保持 16:9)
   2. 控制台打印日志表 (帧号/面积/包围盒/类型)
 
 用法:
   python tf_card_decode.py --image dump.img            # 读镜像文件(推荐, 安全)
   python tf_card_decode.py --drive 3                   # 直接读 \\.\PhysicalDrive3 (需管理员)
-  python tf_card_decode.py --image dump.img --scale 4  # 放大倍数(默认4)
+  python tf_card_decode.py --image dump.img --scale 5  # 宽放大倍数(默认5 -> 1280宽)
   python tf_card_decode.py --image dump.img --outdir out
 
-说明: 缩略图是 320x180 (原图每 4x4 取 1 像素), 放大 4 倍即回到原生 1280x720。
-      RGB332 颜色较粗(256 色), 但火焰的红橙色能清楚辨认, 不再黑白。
+说明: 缩略图 256x120 是按 每5列x每6行 采样得到的, 放大到 16:9 即还原场景比例;
+      RGB565 接近自然色, 无色阶发怪问题(相对 RGB332)。
 """
 import struct, sys, os, argparse
 
 LOG_BASE          = 8      # 日志起始扇区
-SECTORS_PER_ALARM = 114    # 1 日志 + 113 缩略图
-RING_SECTORS      = 1824   # 环形扇区数 (16 次告警 x 114)
-THUMB_W           = 320    # 缩略图宽 (1280/4)
-THUMB_H           = 180    # 缩略图高 (720/4)
+SECTORS_PER_ALARM = 121    # 1 日志 + 120 缩略图
+RING_SECTORS      = 1936   # 环形扇区数 (16 次告警 x 121)
+THUMB_W           = 256    # 缩略图宽 (1280/5)
+THUMB_H           = 120    # 缩略图高 (720/6)
 SECTOR            = 512
 MAGIC             = b'\xa5\xa5\xa5\xa5'
 
@@ -60,43 +60,45 @@ def parse_log(b):
                 fire_v=fv, cig_v=cv, ts=ts)
 
 
-def rgb332_to_rgb888(data):
-    """RGB332 -> RGB888 (位复制展开, 每个字节拆成 3 字节 RGB)"""
-    out = bytearray(len(data) * 3)
-    for i, b in enumerate(data):
-        r  = (b >> 5) & 0x7
-        g  = (b >> 2) & 0x7
-        bl = b & 0x3
-        out[3*i]     = (r << 5) | (r << 2) | (r >> 1)               # 3bit -> 8bit
-        out[3*i + 1] = (g << 5) | (g << 2) | (g >> 1)
-        out[3*i + 2] = (bl << 6) | (bl << 4) | (bl << 2) | bl       # 2bit -> 8bit
+def rgb565_to_rgb888(data):
+    """RGB565(小端: 低字节在前) -> RGB888 (位复制展开)"""
+    n = len(data) // 2
+    out = bytearray(n * 3)
+    for i in range(n):
+        lo = data[2 * i]
+        hi = data[2 * i + 1]
+        r5 = (hi >> 3) & 0x1F
+        g6 = ((hi & 0x07) << 3) | ((lo >> 5) & 0x07)
+        b5 = lo & 0x1F
+        out[3 * i]     = (r5 << 3) | (r5 >> 2)          # 5bit -> 8bit
+        out[3 * i + 1] = (g6 << 2) | (g6 >> 4)          # 6bit -> 8bit
+        out[3 * i + 2] = (b5 << 3) | (b5 >> 2)          # 5bit -> 8bit
     return bytes(out)
 
 
 def decode_thumb(data, scale):
-    """RGB332 缩略图放大 scale 倍 -> (w,h,RGB bytes)。PIL 双线性; 无 PIL 回退最近邻"""
-    rgb = rgb332_to_rgb888(data)
+    """RGB565 缩略图放大 -> (w,h,RGB bytes)。PIL 双线性, 保持 16:9; 无 PIL 回退最近邻"""
+    rgb = rgb565_to_rgb888(data)
+    out_w = THUMB_W * scale
+    out_h = out_w * 9 // 16              # 16:9 (源 1280x720)
     try:
         from PIL import Image
         im = Image.frombytes('RGB', (THUMB_W, THUMB_H), rgb)
-        im = im.resize((THUMB_W * scale, THUMB_H * scale), Image.BILINEAR)
-        return im.size[0], im.size[1], im.tobytes()
+        im = im.resize((out_w, out_h), Image.BILINEAR)
+        return out_w, out_h, im.tobytes()
     except ImportError:
-        # 最近邻 RGB 放大回退
-        w, h = THUMB_W * scale, THUMB_H * scale
-        out = bytearray(w * h * 3)
-        for y in range(h):
-            sy = y // scale
-            for x in range(w):
-                sx = x // scale
+        out = bytearray(out_w * out_h * 3)
+        for y in range(out_h):
+            sy = y * THUMB_H // out_h
+            for x in range(out_w):
+                sx = x * THUMB_W // out_w
                 src = (sy * THUMB_W + sx) * 3
-                dst = (y * w + x) * 3
+                dst = (y * out_w + x) * 3
                 out[dst:dst + 3] = rgb[src:src + 3]
-        return w, h, bytes(out)
+        return out_w, out_h, bytes(out)
 
 
 def write_ppm(path, w, h, data):
-    """P6 彩色 PPM (无 PIL 时的回退格式)"""
     with open(path, 'wb') as f:
         f.write(('P6\n%d %d\n255\n' % (w, h)).encode())
         f.write(data)
@@ -123,10 +125,10 @@ def read_image(args):
 
 
 def main():
-    ap = argparse.ArgumentParser(description='TF卡告警快照解码器 (RGB332彩色)')
+    ap = argparse.ArgumentParser(description='TF卡告警快照解码器 (RGB565彩色)')
     ap.add_argument('--image', help='SD卡镜像文件(.img/.bin)')
     ap.add_argument('--drive', type=int, help='直接读 PhysicalDriveN (需管理员)')
-    ap.add_argument('--scale', type=int, default=4, help='缩略图放大倍数(默认4 -> 1280x720)')
+    ap.add_argument('--scale', type=int, default=5, help='宽放大倍数(默认5 -> 1280x720)')
     ap.add_argument('--outdir', default='tf_out', help='输出目录(默认 tf_out)')
     args = ap.parse_args()
 
@@ -148,11 +150,10 @@ def main():
             break
         log = parse_log(img[sec * SECTOR:(sec + 1) * SECTOR])
         if log is None:
-            continue  # 该槽位空
+            continue
 
-        # 缩略图: 扇区 N+1 .. N+113, 共 57600 字节 (RGB332)
-        raw = img[(sec + 1) * SECTOR:(sec + SECTORS_PER_ALARM) * SECTOR][:THUMB_W * THUMB_H]
-        if len(raw) < THUMB_W * THUMB_H:
+        raw = img[(sec + 1) * SECTOR:(sec + SECTORS_PER_ALARM) * SECTOR][:THUMB_W * THUMB_H * 2]
+        if len(raw) < THUMB_W * THUMB_H * 2:
             print('[槽位%02d] 缩略图数据不足, 跳过' % i)
             continue
         w, h, up = decode_thumb(raw, args.scale)
@@ -172,7 +173,7 @@ def main():
 
     print('\n共解析 %d 条有效告警, 缩略图已存到 %s/' % (n_found, args.outdir))
     if n_found == 0:
-        print('未找到有效数据。可能原因: ①还没触发过告警 ②读错了盘(用 --drive 看盘号) ③扇区被覆盖 ④旧固件数据(格式)与新固件不符')
+        print('未找到有效数据。可能原因: ①还没触发过告警 ②读错了盘 ③扇区被覆盖 ④旧固件数据格式不符')
 
 
 if __name__ == '__main__':

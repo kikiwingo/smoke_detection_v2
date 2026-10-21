@@ -21,7 +21,8 @@ module color_mask_96 #(
     output wire [3:0] O_candidate,
     // 帧级统计 (帧头锁存上一帧, 供 feature_fuse 四维融合):
     output reg [29:0] O_cand_edge_sum,   // 候选区水平梯度能量 (高对比度边缘特征)
-    output reg [29:0] O_luma_sum         // 全帧亮度 r+g+b (场景亮度 -> 自适应阈值)
+    output reg [29:0] O_luma_sum,        // 全帧亮度 r+g+b (场景亮度 -> 自适应阈值)
+    output reg [29:0] O_cand_sat_sum     // 候选区饱和度 (max-min) 和 (色彩纯度特征)
     // 外接框/告警判定由 detect_ccl_96 (连通域检测) 输出, 本模块只出候选与统计
 );
     wire [23:0] pixel0 = I_tdata[95:72];
@@ -89,6 +90,18 @@ module color_mask_96 #(
         end
     endfunction
 
+    // ================= 候选区饱和度 (chroma = max(R,G,B) - min(R,G,B)) =================
+    function [7:0] sat_of;
+        input [23:0] p;
+        reg [7:0] r, g, b, mx, mn;
+        begin
+            r = p[23:16]; g = p[15:8]; b = p[7:0];
+            mx = (r >= g) ? ((r >= b) ? r : b) : ((g >= b) ? g : b);
+            mn = (r <= g) ? ((r <= b) ? r : b) : ((g <= b) ? g : b);
+            sat_of = mx - mn;
+        end
+    endfunction
+
     reg [7:0] prev_r, prev_g, prev_b;
     always @(posedge I_clk or negedge I_rst_n) begin
         if(!I_rst_n) begin
@@ -125,22 +138,34 @@ module color_mask_96 #(
     wire [9:0] luma3 = {2'b0,pixel3[23:16]} + {2'b0,pixel3[15:8]} + {2'b0,pixel3[7:0]};
     wire [11:0] beat_luma = {2'b0,luma0} + {2'b0,luma1} + {2'b0,luma2} + {2'b0,luma3};
 
+    wire [11:0] cand_sat_sum =
+        (O_candidate[0] ? {4'd0, sat_of(pixel0)} : 12'd0) +
+        (O_candidate[1] ? {4'd0, sat_of(pixel1)} : 12'd0) +
+        (O_candidate[2] ? {4'd0, sat_of(pixel2)} : 12'd0) +
+        (O_candidate[3] ? {4'd0, sat_of(pixel3)} : 12'd0);
+
     reg [29:0] cand_edge_accum;
     reg [29:0] luma_accum;
+    reg [29:0] cand_sat_accum;
     always @(posedge I_clk or negedge I_rst_n) begin
         if(!I_rst_n) begin
             cand_edge_accum <= 30'd0;
             luma_accum      <= 30'd0;
+            cand_sat_accum  <= 30'd0;
             O_cand_edge_sum <= 30'd0;
             O_luma_sum      <= 30'd0;
+            O_cand_sat_sum  <= 30'd0;
         end else if(I_tuser) begin
             O_cand_edge_sum <= cand_edge_accum;
             O_luma_sum      <= luma_accum;
+            O_cand_sat_sum  <= cand_sat_accum;
             cand_edge_accum <= I_tvalid ? {18'd0, cand_grad_sum} : 30'd0;
             luma_accum      <= I_tvalid ? {18'd0, beat_luma}    : 30'd0;
+            cand_sat_accum  <= I_tvalid ? {18'd0, cand_sat_sum} : 30'd0;
         end else if(I_tvalid) begin
             cand_edge_accum <= cand_edge_accum + {18'd0, cand_grad_sum};
             luma_accum      <= luma_accum      + {18'd0, beat_luma};
+            cand_sat_accum  <= cand_sat_accum  + {18'd0, cand_sat_sum};
         end
     end
 endmodule
